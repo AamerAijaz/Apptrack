@@ -4,9 +4,9 @@ public sealed class User
 {
     private User() { }
 
-    public User(string email, string provider, DateTime createdAtUtc)
+    public User(Guid id, string email, string provider, DateTime createdAtUtc)
     {
-        Id = Guid.CreateVersion7();
+        Id = id;
         Email = email;
         Provider = provider;
         CreatedAt = createdAtUtc;

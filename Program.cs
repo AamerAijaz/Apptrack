@@ -1,4 +1,6 @@
 using Apptrack.Data;
+using Apptrack.Entities;
+
 using Google.Apis.Auth.OAuth2;
 using Google.Apis.Auth.OAuth2.Flows;
 using Google.Apis.Auth.OAuth2.Requests;
@@ -62,7 +64,7 @@ app.MapGet("/api/auth", (HttpContext ctx) =>
     return Results.Redirect(url.AbsoluteUri);
 });
 
-app.MapGet("/api/auth/callback", async (string? code, string? state, string? error, HttpContext ctx) =>
+app.MapGet("/api/auth/callback", async (string? code, string? state, string? error, HttpContext ctx, AppDbContext db) =>
 {
     try
     {
@@ -74,8 +76,9 @@ app.MapGet("/api/auth/callback", async (string? code, string? state, string? err
             throw new Exception("Invalid OAuth State");
         ctx.Response.Cookies.Delete("oauth_state");
 
-        var token = await flow.ExchangeCodeForTokenAsync("temp-user", code, redirectUri, CancellationToken.None);
-        var credential = new UserCredential(flow, "temp-user", token);
+        var userId = Guid.CreateVersion7();
+        var token = await flow.ExchangeCodeForTokenAsync(userId.ToString(), code, redirectUri, CancellationToken.None);
+        var credential = new UserCredential(flow, userId.ToString(), token);
         var gmail = new GmailService(new BaseClientService.Initializer
         {
             HttpClientInitializer = credential,
@@ -83,7 +86,17 @@ app.MapGet("/api/auth/callback", async (string? code, string? state, string? err
         });
 
         var profile = await gmail.Users.GetProfile("me").ExecuteAsync();
-        Console.WriteLine($"Authorized {profile.EmailAddress}, refresh token present: {token.RefreshToken != null}");
+
+        var emailAddress = profile.EmailAddress ?? throw new Exception("Gmail profile had no email address");
+        var provider = "gmail";
+
+        var user = await db.Users.FirstOrDefaultAsync(u => u.Email == emailAddress && u.Provider == provider);
+        if (user == null)
+        {
+            user = new User(userId, emailAddress, provider, DateTime.UtcNow);
+            await db.Users.AddAsync(user);
+            await db.SaveChangesAsync();
+        }
 
         return Results.Redirect("/api/auth/success");
     }
