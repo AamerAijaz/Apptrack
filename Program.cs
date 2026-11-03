@@ -1,6 +1,6 @@
+using Apptrack.Auth;
 using Apptrack.Data;
 using Apptrack.Entities;
-
 using Google.Apis.Auth.OAuth2;
 using Google.Apis.Auth.OAuth2.Flows;
 using Google.Apis.Auth.OAuth2.Requests;
@@ -15,6 +15,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddOpenApi();
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
+builder.Services.AddSingleton<IDataStore, GoogleTokenDataStore>();
 
 var app = builder.Build();
 
@@ -33,11 +34,11 @@ var scopes = new[]
     "https://www.googleapis.com/auth/userinfo.email",
 };
 
-var flow = new GoogleAuthorizationCodeFlow(new GoogleAuthorizationCodeFlow.Initializer
+var flow = new ApptrackAuthorizationCodeFlow(new GoogleAuthorizationCodeFlow.Initializer
 {
     ClientSecrets = new ClientSecrets { ClientId = clientId, ClientSecret = clientSecret },
     Scopes = scopes,
-    DataStore = new NullDataStore(),
+    DataStore = app.Services.GetRequiredService<IDataStore>(),
 });
 
 app.MapGet("/api/auth", (HttpContext ctx) =>
@@ -76,9 +77,13 @@ app.MapGet("/api/auth/callback", async (string? code, string? state, string? err
             throw new Exception("Invalid OAuth State");
         ctx.Response.Cookies.Delete("oauth_state");
 
-        var userId = Guid.CreateVersion7();
-        var token = await flow.ExchangeCodeForTokenAsync(userId.ToString(), code, redirectUri, CancellationToken.None);
-        var credential = new UserCredential(flow, userId.ToString(), token);
+        // By default the GoogleAuthorizationCodeFlow stores the token in the DataStore if provided.
+        // Here, we exchange the code for the token without storing.
+        var token = await flow.ExchangeCodeWithoutStoringAsync("temp-user", code, redirectUri, CancellationToken.None);
+
+        // Create a new gmail service for user.
+        // We use 'temp-user' as the userId, since this could be a returning user.
+        var credential = new UserCredential(flow, "temp-user", token);
         var gmail = new GmailService(new BaseClientService.Initializer
         {
             HttpClientInitializer = credential,
@@ -86,19 +91,81 @@ app.MapGet("/api/auth/callback", async (string? code, string? state, string? err
         });
 
         var profile = await gmail.Users.GetProfile("me").ExecuteAsync();
-
         var emailAddress = profile.EmailAddress ?? throw new Exception("Gmail profile had no email address");
         var provider = "gmail";
 
+        if (string.IsNullOrEmpty(token.AccessToken))
+            throw new InvalidOperationException("Access token is required.");
+        if (token.ExpiresInSeconds is not long expiresInSeconds)
+            throw new InvalidOperationException("Token expiry is required.");
+
+        var issuedUtc = GoogleTokenDataStore.AsUtc(token.IssuedUtc);
         var user = await db.Users.FirstOrDefaultAsync(u => u.Email == emailAddress && u.Provider == provider);
-        if (user == null)
+
+        await using (var tx = await db.Database.BeginTransactionAsync())
         {
-            user = new User(userId, emailAddress, provider, DateTime.UtcNow);
-            await db.Users.AddAsync(user);
+            if (user is null)
+            {
+                if (string.IsNullOrEmpty(token.RefreshToken))
+                    throw new InvalidOperationException("Refresh token is required.");
+
+                user = new User(Guid.CreateVersion7(), emailAddress, provider, DateTime.UtcNow);
+                db.Users.Add(user);
+                db.GoogleAccessTokens.Add(new GoogleAccessToken(
+                    user.Id,
+                    token.AccessToken,
+                    token.RefreshToken,
+                    issuedUtc,
+                    expiresInSeconds,
+                    DateTime.UtcNow));
+            }
+            else
+            {
+                var existing = await db.GoogleAccessTokens.FirstOrDefaultAsync(t => t.UserId == user.Id);
+                if (existing is null)
+                {
+                    if (string.IsNullOrEmpty(token.RefreshToken))
+                        throw new InvalidOperationException("Refresh token is required.");
+
+                    db.GoogleAccessTokens.Add(new GoogleAccessToken(
+                        user.Id,
+                        token.AccessToken,
+                        token.RefreshToken,
+                        issuedUtc,
+                        expiresInSeconds,
+                        DateTime.UtcNow));
+                }
+                else
+                {
+                    existing.UpdateTokens(token.AccessToken, token.RefreshToken, issuedUtc, expiresInSeconds);
+                }
+            }
+
             await db.SaveChangesAsync();
+            await tx.CommitAsync();
         }
 
-        return Results.Redirect("/api/auth/success");
+        // Re-initialize the gmail-service using the user.id
+        credential = new UserCredential(flow, user.Id.ToString(), token);
+        gmail = new GmailService(new BaseClientService.Initializer
+        {
+            HttpClientInitializer = credential,
+            ApplicationName = "Apptrack"
+        });
+
+        // Setup the gmail watch for the user.
+        // Ideally, this is done in some hosted service or another API-Call that we can fire and forget.
+        var request = gmail.Users.Watch(new Google.Apis.Gmail.v1.Data.WatchRequest
+        {
+            LabelIds = ["SENT", "INBOX"],
+            LabelFilterBehavior = "INCLUDE",
+            TopicName = builder.Configuration["Google:TopicName"],
+        }, "me");
+
+        var response = await request.ExecuteAsync();
+        return response.Expiration is null || response.HistoryId is null
+            ? Results.Redirect("/api/auth/success")
+            : throw new Exception("Missing experiation or historyId in watch response");
     }
     catch (Exception ex)
     {
