@@ -1,6 +1,7 @@
 using Apptrack.Auth;
 using Apptrack.Data;
 using Apptrack.Entities;
+using Apptrack.Services;
 using Google.Apis.Auth.OAuth2;
 using Google.Apis.Auth.OAuth2.Flows;
 using Google.Apis.Auth.OAuth2.Requests;
@@ -17,8 +18,6 @@ builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
 builder.Services.AddSingleton<IDataStore, GoogleTokenDataStore>();
 
-var app = builder.Build();
-
 var clientId = builder.Configuration["Google:ClientId"];
 var clientSecret = builder.Configuration["Google:ClientSecret"];
 var redirectUri = builder.Configuration["Google:RedirectUri"];
@@ -34,12 +33,17 @@ var scopes = new[]
     "https://www.googleapis.com/auth/userinfo.email",
 };
 
-var flow = new ApptrackAuthorizationCodeFlow(new GoogleAuthorizationCodeFlow.Initializer
+builder.Services.AddSingleton(sp => new ApptrackAuthorizationCodeFlow(new GoogleAuthorizationCodeFlow.Initializer
 {
     ClientSecrets = new ClientSecrets { ClientId = clientId, ClientSecret = clientSecret },
     Scopes = scopes,
-    DataStore = app.Services.GetRequiredService<IDataStore>(),
-});
+    DataStore = sp.GetRequiredService<IDataStore>(),
+}));
+builder.Services.AddSingleton<IMailboxClientFactory, GmailMailboxClientFactory>();
+builder.Services.AddScoped<GmailSyncService>();
+
+var app = builder.Build();
+var flow = app.Services.GetRequiredService<ApptrackAuthorizationCodeFlow>();
 
 app.MapGet("/api/auth", (HttpContext ctx) =>
 {
@@ -65,7 +69,7 @@ app.MapGet("/api/auth", (HttpContext ctx) =>
     return Results.Redirect(url.AbsoluteUri);
 });
 
-app.MapGet("/api/auth/callback", async (string? code, string? state, string? error, HttpContext ctx, AppDbContext db) =>
+app.MapGet("/api/auth/callback", async (string? code, string? state, string? error, HttpContext ctx, AppDbContext db, GmailSyncService sync) =>
 {
     try
     {
@@ -145,27 +149,8 @@ app.MapGet("/api/auth/callback", async (string? code, string? state, string? err
             await tx.CommitAsync();
         }
 
-        // Re-initialize the gmail-service using the user.id
-        credential = new UserCredential(flow, user.Id.ToString(), token);
-        gmail = new GmailService(new BaseClientService.Initializer
-        {
-            HttpClientInitializer = credential,
-            ApplicationName = "Apptrack"
-        });
-
-        // Setup the gmail watch for the user.
-        // Ideally, this is done in some hosted service or another API-Call that we can fire and forget.
-        var request = gmail.Users.Watch(new Google.Apis.Gmail.v1.Data.WatchRequest
-        {
-            LabelIds = ["SENT", "INBOX"],
-            LabelFilterBehavior = "INCLUDE",
-            TopicName = builder.Configuration["Google:TopicName"],
-        }, "me");
-
-        var response = await request.ExecuteAsync();
-        return response.Expiration is null || response.HistoryId is null
-            ? Results.Redirect("/api/auth/success")
-            : throw new Exception("Missing experiation or historyId in watch response");
+        await sync.StartWatchAsync(user.Id);
+        return Results.Redirect("/api/auth/success");
     }
     catch (Exception ex)
     {
@@ -174,11 +159,26 @@ app.MapGet("/api/auth/callback", async (string? code, string? state, string? err
     }
 });
 
+app.MapPost("/api/applications/gmail/webhook", async (PubSubPush push, GmailSyncService sync) =>
+{
+    try
+    {
+        await sync.ProcessPushAsync(push);
+        return Results.Ok();
+    }
+    catch (GmailSyncRetryException ex)
+    {
+        Console.Error.WriteLine($"Error processing webhook: {ex}");
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    }
+});
+
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
+} else
+{
+    app.UseHttpsRedirection();
 }
-
-app.UseHttpsRedirection();
 
 app.Run();

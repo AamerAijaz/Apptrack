@@ -22,6 +22,25 @@ namespace apptrack.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("Apptrack.Entities.GmailWatch", b =>
+                {
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<decimal>("HistoryId")
+                        .HasColumnType("numeric(20,0)");
+
+                    b.Property<DateTime>("WatchExpiration")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("UserId");
+
+                    b.ToTable("gmail_watches", (string)null);
+                });
+
             modelBuilder.Entity("Apptrack.Entities.GoogleAccessToken", b =>
                 {
                     b.Property<int>("Id")
@@ -90,6 +109,15 @@ namespace apptrack.Migrations
                         .HasFilter("\"DeletedAt\" IS NULL");
 
                     b.ToTable("users", (string)null);
+                });
+
+            modelBuilder.Entity("Apptrack.Entities.GmailWatch", b =>
+                {
+                    b.HasOne("Apptrack.Entities.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("Apptrack.Entities.GoogleAccessToken", b =>
