@@ -210,3 +210,10 @@ FakesAssemblies/
 *.sln.iml
 *.env
 *.http
+
+# React dev app
+web/node_modules/
+web/dist/
+web/.cert/
+
+node_modules/
