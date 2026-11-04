@@ -175,6 +175,26 @@ public sealed class GmailSyncServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Push_logs_every_inbox_message_in_a_larger_batch()
+    {
+        await SeedUser("ada@example.com");
+        _mailboxes.NextWatch = new WatchRegistration(100, new DateTime(2026, 12, 1, 0, 0, 0, DateTimeKind.Utc));
+        await _sync.StartWatchAsync((await _db.Users.SingleAsync()).Id);
+
+        var ids = Enumerable.Range(1, 8).Select(i => $"inbox-{i}").ToArray();
+        _mailboxes.OnList = _ => new HistoryBatch(180, ids);
+        foreach (var id in ids)
+            _mailboxes.Messages[id] = new MailMessage(id, $"body {id}", ["INBOX"]);
+
+        await _sync.ProcessPushAsync(Push("ada@example.com", 150));
+
+        foreach (var id in ids)
+            Assert.Contains(_logger.Lines, line => line.Contains($"body {id}"));
+        _db.ChangeTracker.Clear();
+        Assert.Equal(180ul, (await _db.GmailWatches.SingleAsync()).HistoryId);
+    }
+
+    [Fact]
     public async Task Already_read_history_is_acknowledged_without_listing()
     {
         var userId = await SeedUser("ada@example.com");
@@ -200,6 +220,22 @@ public sealed class GmailSyncServiceTests : IDisposable
 
         Assert.Equal(100ul, (await _db.GmailWatches.SingleAsync()).HistoryId);
         Assert.Empty(_logger.Lines);
+    }
+
+    [Fact]
+    public async Task Failed_message_read_does_not_advance_the_cursor()
+    {
+        await SeedUser("ada@example.com");
+        _mailboxes.NextWatch = new WatchRegistration(100, new DateTime(2026, 12, 1, 0, 0, 0, DateTimeKind.Utc));
+        await _sync.StartWatchAsync((await _db.Users.SingleAsync()).Id);
+        _mailboxes.OnList = _ => new HistoryBatch(180, ["inbox-1", "inbox-2"]);
+        _mailboxes.Messages["inbox-1"] = new MailMessage("inbox-1", "ok", ["INBOX"]);
+        _mailboxes.ReadError = new GmailSyncRetryException("rate limited");
+
+        await Assert.ThrowsAsync<GmailSyncRetryException>(() => _sync.ProcessPushAsync(Push("ada@example.com", 150)));
+
+        _db.ChangeTracker.Clear();
+        Assert.Equal(100ul, (await _db.GmailWatches.SingleAsync()).HistoryId);
     }
 
     [Fact]
@@ -256,6 +292,7 @@ public sealed class GmailSyncServiceTests : IDisposable
         public Exception? WatchError { get; set; }
         public Func<ulong, HistoryBatch>? OnList { get; set; }
         public Dictionary<string, MailMessage> Messages { get; } = [];
+        public Exception? ReadError { get; set; }
         public Guid? OpenedFor { get; private set; }
 
         public Task<IMailboxClient?> OpenAsync(Guid userId, CancellationToken ct)
@@ -276,8 +313,12 @@ public sealed class GmailSyncServiceTests : IDisposable
             public Task<HistoryBatch> ListAddedSinceAsync(ulong startHistoryId, CancellationToken ct) =>
                 Task.FromResult(owner.OnList?.Invoke(startHistoryId) ?? throw new InvalidOperationException("No history was arranged."));
 
-            public Task<MailMessage?> ReadAsync(string messageId, CancellationToken ct) =>
-                Task.FromResult(owner.Messages.TryGetValue(messageId, out var message) ? message : null);
+            public Task<MailMessage?> ReadAsync(string messageId, CancellationToken ct)
+            {
+                if (owner.ReadError is not null)
+                    throw owner.ReadError;
+                return Task.FromResult(owner.Messages.TryGetValue(messageId, out var message) ? message : null);
+            }
         }
     }
 
@@ -289,7 +330,10 @@ public sealed class GmailSyncServiceTests : IDisposable
 
         public bool IsEnabled(LogLevel logLevel) => true;
 
-        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
-            Lines.Add(formatter(state, exception));
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            lock (Lines)
+                Lines.Add(formatter(state, exception));
+        }
     }
 }

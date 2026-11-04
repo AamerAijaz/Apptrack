@@ -41,18 +41,23 @@ public sealed class GmailSyncService(
             return;
 
         var batch = await mailbox.ListAddedSinceAsync(watch.HistoryId, ct);
-        foreach (var messageId in batch.MessageIds)
-        {
-            var message = await mailbox.ReadAsync(messageId, ct);
-            if (message is null || !message.LabelIds.Any(label => KeptLabels.Contains(label)))
-                continue;
-
-            logger.LogInformation(
-                "Gmail message {MessageId} for {Email}\n{Content}",
-                message.MessageId,
-                email,
-                message.Content);
-        }
+        await Parallel.ForEachAsync(
+            batch.MessageIds,
+            new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = ct },
+            async (messageId, token) =>
+            {
+                var message = await mailbox.ReadAsync(messageId, token);
+                if (message is null || !message.LabelIds.Any(label => KeptLabels.Contains(label)))
+                    return;
+                if (logger.IsEnabled(LogLevel.Information))
+                {
+                    logger.LogInformation(
+                        "Gmail message {MessageId} for {Email}\n{Content}",
+                        message.MessageId,
+                        email,
+                        message.Content);
+                }
+            });
 
         await db.GmailWatches
             .Where(w => w.UserId == user.Id && w.HistoryId < batch.HistoryId)

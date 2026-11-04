@@ -94,13 +94,15 @@ public sealed class GmailMailboxClient(GmailService gmail) : IMailboxClient
 
     public async Task<MailMessage?> ReadAsync(string messageId, CancellationToken ct)
     {
-        var request = gmail.Users.Messages.Get("me", messageId);
-        request.Format = UsersResource.MessagesResource.GetRequest.FormatEnum.Full;
-
         Message message;
         try
         {
-            message = await request.ExecuteAsync(ct);
+            message = await ExecuteWithBackoffAsync(async () =>
+            {
+                var request = gmail.Users.Messages.Get("me", messageId);
+                request.Format = UsersResource.MessagesResource.GetRequest.FormatEnum.Full;
+                return await request.ExecuteAsync(ct);
+            }, ct);
         }
         catch (GoogleApiException ex) when (ex.HttpStatusCode == HttpStatusCode.NotFound)
         {
@@ -113,6 +115,23 @@ public sealed class GmailMailboxClient(GmailService gmail) : IMailboxClient
 
         var labels = message.LabelIds?.ToArray() ?? [];
         return new MailMessage(messageId, ReadContent(message), labels);
+    }
+
+    private static async Task<T> ExecuteWithBackoffAsync<T>(Func<Task<T>> send, CancellationToken ct)
+    {
+        const int maxAttempts = 4;
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return await send();
+            }
+            catch (GoogleApiException ex) when (ex.HttpStatusCode == HttpStatusCode.TooManyRequests && attempt < maxAttempts - 1)
+            {
+                var delay = TimeSpan.FromMilliseconds(200 * Math.Pow(2, attempt));
+                await Task.Delay(delay, ct);
+            }
+        }
     }
 
     private static string ReadContent(Message message)
