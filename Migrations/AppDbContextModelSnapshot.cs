@@ -22,6 +22,55 @@ namespace apptrack.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("Apptrack.Entities.ApplicationNotice", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Company")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Content")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("DeletedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("MessageId")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("Role")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("SentAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("UserId", "MessageId")
+                        .IsUnique();
+
+                    b.ToTable("application_notices", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_application_notices_Status", "\"Status\" IN ('Application Sent', 'Interviewing', 'Rejected')");
+                        });
+                });
+
             modelBuilder.Entity("Apptrack.Entities.GmailWatch", b =>
                 {
                     b.Property<Guid>("UserId")
@@ -109,6 +158,15 @@ namespace apptrack.Migrations
                         .HasFilter("\"DeletedAt\" IS NULL");
 
                     b.ToTable("users", (string)null);
+                });
+
+            modelBuilder.Entity("Apptrack.Entities.ApplicationNotice", b =>
+                {
+                    b.HasOne("Apptrack.Entities.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("Apptrack.Entities.GmailWatch", b =>

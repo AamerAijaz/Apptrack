@@ -1,6 +1,6 @@
 # AppTrack
 
-The candidacies a person has underway, opened from mailbox confirmations and corrected by that person.
+The candidacies a person has underway, opened from application notices and corrected by that person.
 
 ## Language
 
@@ -13,8 +13,16 @@ The organization a Job Application is with. Every Job Application has a known Co
 _Avoid_: Employer, organization
 
 **Role**:
-The position a Job Application is for. The Role is unnamed when that position is not known. Its title can be corrected later.
-_Avoid_: Job title, position, opening
+The position a Job Application is for. The Role is unnamed when that position is not specified or cannot be determined. Its title can be corrected later.
+_Avoid_: Job title, position, opening, undetermined
+
+**Application Notice**:
+An inbound email that reports the status of exactly one candidacy at a known Company. That status is Application Sent, Interviewing, or Rejected. The Role may be unnamed. It records the time the mail was sent to the person.
+_Avoid_: confirmation, job alert, no-reply, job notice
+
+**Sent at**:
+The time an Application Notice was sent to the person, taken from the mail's Date header.
+_Avoid_: received at, internal date
 
 ## Status
 

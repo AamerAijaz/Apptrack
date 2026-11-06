@@ -114,7 +114,7 @@ public sealed class GmailMailboxClient(GmailService gmail) : IMailboxClient
         }
 
         var labels = message.LabelIds?.ToArray() ?? [];
-        return new MailMessage(messageId, ReadContent(message), labels);
+        return new MailMessage(messageId, await ReadContentAsync(messageId, message, ct), labels);
     }
 
     private static async Task<T> ExecuteWithBackoffAsync<T>(Func<Task<T>> send, CancellationToken ct)
@@ -134,41 +134,72 @@ public sealed class GmailMailboxClient(GmailService gmail) : IMailboxClient
         }
     }
 
-    private static string ReadContent(Message message)
+    private async Task<string> ReadContentAsync(string messageId, Message message, CancellationToken ct)
     {
         var headers = message.Payload?.Headers;
         string Header(string name) =>
             headers?.FirstOrDefault(h => string.Equals(h.Name, name, StringComparison.OrdinalIgnoreCase))?.Value ?? "";
 
-        var body = FindText(message.Payload);
-        return $"From: {Header("From")}\nSubject: {Header("Subject")}\n\n{body}";
+        var body = await FindTextAsync(messageId, message.Payload, ct);
+        return $"From: {Header("From")}\nSubject: {Header("Subject")}\nDate: {Header("Date")}\n\n{body}";
     }
 
-    private static string FindText(MessagePart? part)
+    private async Task<string> FindTextAsync(string messageId, MessagePart? part, CancellationToken ct)
+    {
+        var plain = await FindPartAsync(messageId, part, "text/plain", ct);
+        if (!string.IsNullOrWhiteSpace(plain))
+            return plain;
+
+        return await FindPartAsync(messageId, part, "text/html", ct);
+    }
+
+    private async Task<string> FindPartAsync(string messageId, MessagePart? part, string mimeType, CancellationToken ct)
     {
         if (part is null)
             return "";
 
-        if (string.Equals(part.MimeType, "text/plain", StringComparison.OrdinalIgnoreCase) && part.Body?.Data is not null)
-            return DecodeBase64Url(part.Body.Data);
+        if (string.Equals(part.MimeType, mimeType, StringComparison.OrdinalIgnoreCase))
+        {
+            var text = await ReadPartBodyAsync(messageId, part, ct);
+            if (!string.IsNullOrWhiteSpace(text))
+                return text;
+        }
 
         if (part.Parts is null)
             return "";
 
         foreach (var child in part.Parts)
         {
-            var text = FindText(child);
-            if (!string.IsNullOrEmpty(text))
+            var text = await FindPartAsync(messageId, child, mimeType, ct);
+            if (!string.IsNullOrWhiteSpace(text))
                 return text;
         }
 
-        foreach (var child in part.Parts)
+        return "";
+    }
+
+    private async Task<string> ReadPartBodyAsync(string messageId, MessagePart part, CancellationToken ct)
+    {
+        if (part.Body?.Data is string data)
+            return DecodeBase64Url(data);
+
+        var attachmentId = part.Body?.AttachmentId;
+        if (string.IsNullOrEmpty(attachmentId))
+            return "";
+
+        MessagePartBody attachment;
+        try
         {
-            if (string.Equals(child.MimeType, "text/html", StringComparison.OrdinalIgnoreCase) && child.Body?.Data is not null)
-                return DecodeBase64Url(child.Body.Data);
+            attachment = await ExecuteWithBackoffAsync(
+                () => gmail.Users.Messages.Attachments.Get("me", messageId, attachmentId).ExecuteAsync(ct),
+                ct);
+        }
+        catch (GoogleApiException ex)
+        {
+            throw new GmailSyncRetryException($"Gmail message {messageId} could not be read.", ex);
         }
 
-        return "";
+        return attachment.Data is null ? "" : DecodeBase64Url(attachment.Data);
     }
 
     private static string DecodeBase64Url(string data)

@@ -1,6 +1,8 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using Apptrack.Data;
+using Apptrack.Services.NoticeExtraction;
 using Microsoft.EntityFrameworkCore;
 
 namespace Apptrack.Services;
@@ -13,11 +15,12 @@ public sealed class GmailSyncRetryException(string message, Exception? inner = n
 public sealed class GmailSyncService(
     AppDbContext db,
     IMailboxClientFactory mailboxes,
+    IApplicationNoticeExtractor notices,
     IConfiguration configuration,
     ILogger<GmailSyncService> logger)
 {
     public const string Provider = "gmail";
-    private static readonly string[] KeptLabels = ["INBOX", "SENT"];
+    private const string InboxLabel = "INBOX";
 
     public async Task ProcessPushAsync(PubSubPush push, CancellationToken ct = default)
     {
@@ -41,27 +44,69 @@ public sealed class GmailSyncService(
             return;
 
         var batch = await mailbox.ListAddedSinceAsync(watch.HistoryId, ct);
-        await Parallel.ForEachAsync(
-            batch.MessageIds,
-            new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = ct },
-            async (messageId, token) =>
+        foreach(string messageId in batch.MessageIds)
+        {
+            var message = await mailbox.ReadAsync(messageId, ct);
+            if (message is null || !message.LabelIds.Contains(InboxLabel)) continue;
+
+            ApplicationNotice? notice;
+            try
             {
-                var message = await mailbox.ReadAsync(messageId, token);
-                if (message is null || !message.LabelIds.Any(label => KeptLabels.Contains(label)))
-                    return;
-                if (logger.IsEnabled(LogLevel.Information))
-                {
-                    logger.LogInformation(
-                        "Gmail message {MessageId} for {Email}\n{Content}",
-                        message.MessageId,
-                        email,
-                        message.Content);
-                }
-            });
+                notice = await notices.ExtractAsync(message.MessageId, message.Content, ct);
+            }
+            catch (NoticeExtractionUnavailableException ex)
+            {
+                throw new GmailSyncRetryException(
+                    $"Gmail message {message.MessageId} could not be read as an application notice.",
+                    ex);
+            }
+
+            if (notice is not null)
+            {
+                await StoreNoticeAsync(user.Id, message, notice, ct);
+            }
+        }
 
         await db.GmailWatches
             .Where(w => w.UserId == user.Id && w.HistoryId < batch.HistoryId)
             .ExecuteUpdateAsync(setters => setters.SetProperty(w => w.HistoryId, batch.HistoryId), ct);
+    }
+
+    private async Task StoreNoticeAsync(Guid userId, MailMessage message, ApplicationNotice notice, CancellationToken ct)
+    {
+        var alreadyStored = await db.ApplicationNotices
+            .IgnoreQueryFilters()
+            .AnyAsync(n => n.UserId == userId && n.MessageId == message.MessageId, ct);
+        if (alreadyStored)
+            return;
+
+        db.ApplicationNotices.Add(new Entities.ApplicationNotice(
+            userId,
+            message.MessageId,
+            notice.Company,
+            notice.Role.Title,
+            notice.Status.DisplayName(),
+            notice.SentAt.UtcDateTime,
+            message.Content));
+
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException)
+        {
+            foreach (var entry in db.ChangeTracker.Entries<Entities.ApplicationNotice>().ToList())
+            {
+                if (entry.State == EntityState.Added)
+                    entry.State = EntityState.Detached;
+            }
+
+            var stored = await db.ApplicationNotices
+                .IgnoreQueryFilters()
+                .AnyAsync(n => n.UserId == userId && n.MessageId == message.MessageId, ct);
+            if (!stored)
+                throw;
+        }
     }
 
     public async Task StartWatchAsync(Guid userId, CancellationToken ct = default)

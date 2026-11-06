@@ -2,6 +2,7 @@ using Apptrack.Auth;
 using Apptrack.Data;
 using Apptrack.Entities;
 using Apptrack.Services;
+using Apptrack.Services.NoticeExtraction;
 using Google.Apis.Auth.OAuth2;
 using Google.Apis.Auth.OAuth2.Flows;
 using Google.Apis.Auth.OAuth2.Requests;
@@ -40,6 +41,10 @@ builder.Services.AddSingleton(sp => new ApptrackAuthorizationCodeFlow(new Google
     DataStore = sp.GetRequiredService<IDataStore>(),
 }));
 builder.Services.AddSingleton<IMailboxClientFactory, GmailMailboxClientFactory>();
+builder.Services.AddSingleton<IApplicationNoticeExtractor>(sp =>
+    new AiNoticeExtractor(
+        sp.GetRequiredService<IConfiguration>(),
+        logger: sp.GetRequiredService<ILogger<AiNoticeExtractor>>()));
 builder.Services.AddScoped<GmailSyncService>();
 
 var app = builder.Build();
