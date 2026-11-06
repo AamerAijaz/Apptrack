@@ -85,7 +85,8 @@ public interface IApplicationNoticeExtractor
 {
     /// <summary>
     /// Reads one application notice from a message content string.
-    /// Returns null when the content is not exactly one notice, including a missing sent time.
+    /// Returns null when the content is not exactly one notice.
+    /// When the content has no readable Date header, the sent time falls back to the current time.
     /// Throws <see cref="NoticeExtractionUnavailableException"/> when the vendor cannot return a trustworthy answer.
     /// </summary>
     Task<ApplicationNotice?> ExtractAsync(string messageId, string content, CancellationToken ct);

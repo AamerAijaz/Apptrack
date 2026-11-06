@@ -12,7 +12,8 @@ namespace Apptrack.Services.NoticeExtraction;
 /// Reads one application notice from message content with a language model.
 /// Chat completions go through the OpenAI SDK. <c>Ai:BaseUrl</c> is the base URL,
 /// so the same client can call OpenAI or Anthropic's compatible endpoint.
-/// The sent time is taken from the content's Date header, not from the model.
+/// The sent time is taken from the content's Date header, not from the model, and falls back
+/// to the current time when that header is missing or cannot be read.
 /// </summary>
 public sealed partial class AiNoticeExtractor(
     IConfiguration configuration,
@@ -71,7 +72,7 @@ public sealed partial class AiNoticeExtractor(
         if (string.IsNullOrWhiteSpace(text))
             throw new NoticeExtractionUnavailableException("The language model returned no classification.");
 
-        var notice = Classification.Interpret(content, text, out var rejection);
+        var notice = Classification.Interpret(content, text, DateTimeOffset.UtcNow, out var rejection);
         if (notice is null)
         {
             logger?.LogInformation(
@@ -172,7 +173,11 @@ public sealed partial class AiNoticeExtractor(
 
         public readonly record struct Rejection(string Reason, string? Company, string? Role, string? Status);
 
-        public static ApplicationNotice? Interpret(string content, string modelJson, out Rejection rejection)
+        public static ApplicationNotice? Interpret(
+            string content,
+            string modelJson,
+            DateTimeOffset fallbackSentAt,
+            out Rejection rejection)
         {
             rejection = new Rejection("The classification was rejected.", null, null, null);
             JsonDocument document;
@@ -203,7 +208,7 @@ public sealed partial class AiNoticeExtractor(
                 if (!IsGrounded(company, content))
                     return Reject(ref rejection, "The company does not appear in the message.", company, role, statusText);
                 if (!TryReadSentAt(content, out var sentAt))
-                    return Reject(ref rejection, "The sent time could not be read from the Date header.", company, role, statusText);
+                    sentAt = fallbackSentAt;
 
                 var applicationRole = string.IsNullOrWhiteSpace(role)
                     ? ApplicationRole.Unnamed

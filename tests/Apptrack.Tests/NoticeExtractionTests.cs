@@ -65,15 +65,56 @@ public sealed class LlmNoticeExtractorTests
     }
 
     [Fact]
-    public async Task A_notice_without_a_sent_time_is_not_returned()
+    public async Task A_notice_without_a_sent_time_falls_back_to_the_current_time()
     {
         var content = "From: Acme Careers <jobs@acme.com>\nSubject: Thanks for applying\n\nWe received your application.";
+        var completion = """{"company":"Acme","role":null,"status":"Application Sent"}""";
+        var extractor = Extractor(_ => JsonResponse(completion));
+        var before = DateTimeOffset.UtcNow;
+
+        var notice = await extractor.ExtractAsync("msg-1", content, CancellationToken.None);
+
+        Assert.NotNull(notice);
+        Assert.InRange(notice.SentAt, before.AddSeconds(-1), DateTimeOffset.UtcNow.AddSeconds(1));
+    }
+
+    [Fact]
+    public async Task An_unparseable_date_header_falls_back_to_the_current_time()
+    {
+        var content = """
+            From: Acme Careers <jobs@acme.com>
+            Subject: Thanks for applying
+            Date: yesterday
+
+            We received your application.
+            """;
+        var completion = """{"company":"Acme","role":null,"status":"Application Sent"}""";
+        var extractor = Extractor(_ => JsonResponse(completion));
+        var before = DateTimeOffset.UtcNow;
+
+        var notice = await extractor.ExtractAsync("msg-1", content, CancellationToken.None);
+
+        Assert.NotNull(notice);
+        Assert.InRange(notice.SentAt, before.AddSeconds(-1), DateTimeOffset.UtcNow.AddSeconds(1));
+    }
+
+    [Fact]
+    public async Task A_readable_date_header_wins_over_the_current_time()
+    {
+        var content = """
+            From: Acme Careers <jobs@acme.com>
+            Subject: Thanks for applying
+            Date: Tue, 03 Nov 2026 14:30:00 +0000
+
+            We received your application.
+            """;
         var completion = """{"company":"Acme","role":null,"status":"Application Sent"}""";
         var extractor = Extractor(_ => JsonResponse(completion));
 
         var notice = await extractor.ExtractAsync("msg-1", content, CancellationToken.None);
 
-        Assert.Null(notice);
+        Assert.NotNull(notice);
+        Assert.Equal(new DateTimeOffset(2026, 11, 3, 14, 30, 0, TimeSpan.Zero), notice.SentAt);
     }
 
     [Fact]
