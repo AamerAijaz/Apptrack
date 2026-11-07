@@ -139,7 +139,8 @@ a:focus-visible {
   color: var(--muted);
 }
 
-.specimen {
+.specimen,
+.notice-card {
   border: 1px solid var(--rule);
   border-top: 4px solid var(--spruce);
   padding: 20px 20px 16px;
@@ -155,13 +156,15 @@ a:focus-visible {
   color: var(--spruce);
 }
 
-.specimen-company {
+.specimen-company,
+.notice-company {
   font-family: var(--serif);
   font-size: 26px;
   line-height: 1.2;
 }
 
-.specimen-role {
+.specimen-role,
+.notice-role {
   color: var(--muted);
 }
 
@@ -186,7 +189,8 @@ a:focus-visible {
   color: var(--interviewing);
 }
 
-.specimen-source {
+.specimen-source,
+.notice-sent {
   margin-top: 8px;
   padding-top: 12px;
   border-top: 1px solid var(--rule);
@@ -238,6 +242,103 @@ a:focus-visible {
 .colophon {
   padding-bottom: 40px;
   font-size: 12px;
+  color: var(--muted);
+}
+
+.connect-error {
+  color: var(--rejected);
+  font-weight: 500;
+}
+
+.signed-in {
+  color: var(--muted);
+  text-align: right;
+}
+
+.notice-sheet {
+  width: min(1080px, calc(100% - 48px));
+  margin-inline: auto;
+  display: grid;
+  gap: 28px;
+  padding-block: 12px 72px;
+}
+
+.notice-message {
+  display: grid;
+  justify-items: start;
+  gap: 16px;
+}
+
+.notice-empty-copy {
+  max-width: 38rem;
+  color: var(--muted);
+}
+
+.notice-groups {
+  display: grid;
+  gap: 40px;
+}
+
+.notice-group {
+  display: grid;
+  gap: 16px;
+}
+
+.notice-group h2 {
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.notice-group--sent h2 {
+  color: var(--sent);
+}
+
+.notice-group--interviewing h2 {
+  color: var(--interviewing);
+}
+
+.notice-group--rejected h2 {
+  color: var(--rejected);
+}
+
+.notice-list {
+  display: grid;
+  gap: 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.notice-card--sent {
+  border-top-color: var(--sent);
+}
+
+.notice-card--interviewing {
+  border-top-color: var(--interviewing);
+}
+
+.notice-card--rejected {
+  border-top-color: var(--rejected);
+}
+
+.notice-status {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.notice-card--sent .notice-status {
+  color: var(--sent);
+}
+
+.notice-card--interviewing .notice-status {
+  color: var(--interviewing);
+}
+
+.notice-card--rejected .notice-status {
+  color: var(--rejected);
+}
+
+.notice-none {
   color: var(--muted);
 }
 

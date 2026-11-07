@@ -18,6 +18,11 @@ export function Landing() {
               Application for each one, with the Company, the Role, and where it
               stands. You correct what the mail got wrong.
             </p>
+            {window.location.search === "?connect=failed" ? (
+              <p className="connect-error" role="alert">
+                Gmail couldn't be connected. Try again.
+              </p>
+            ) : null}
             <ConnectGmail />
             <p className="fineprint">
               Read-only Gmail access. AppTrack never sends mail.
