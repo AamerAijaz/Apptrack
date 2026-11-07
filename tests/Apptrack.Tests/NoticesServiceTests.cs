@@ -1,0 +1,255 @@
+using System.Data.Common;
+using System.Text.Json;
+using Apptrack.Auth;
+using Apptrack.Data;
+using Apptrack.Entities;
+using Apptrack.Endpoints;
+using Apptrack.Services;
+using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.HttpResults;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Xunit;
+
+namespace Apptrack.Tests;
+
+public sealed class NoticesServiceTests : IDisposable
+{
+    private readonly SqliteConnection _connection;
+    private readonly AppDbContext _db;
+    private readonly CommandLog _commands = new();
+    private readonly NoticesService _notices;
+    private readonly SessionCookie _session = new(new EphemeralDataProtectionProvider(), TimeProvider.System);
+
+    public NoticesServiceTests()
+    {
+        _connection = new SqliteConnection("Data Source=:memory:");
+        _connection.Open();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(_connection)
+            .AddInterceptors(_commands)
+            .Options;
+        _db = new AppDbContext(options);
+        _db.Database.EnsureCreated();
+        _notices = new NoticesService(_db);
+    }
+
+    [Fact]
+    public async Task Unknown_person_is_null()
+    {
+        Assert.Null(await _notices.LoadAsync(Guid.CreateVersion7(), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Soft_deleted_person_is_null()
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Application Sent", At(1));
+        (await _db.Users.SingleAsync()).Delete(DateTime.UtcNow);
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+
+        Assert.Null(await _notices.LoadAsync(userId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Person_without_notices_gets_their_address_and_an_empty_list()
+    {
+        var userId = await SeedUser("ada@example.com");
+
+        var page = await _notices.LoadAsync(userId, CancellationToken.None);
+
+        Assert.NotNull(page);
+        Assert.Equal("ada@example.com", page.Email);
+        Assert.Empty(page.Notices);
+    }
+
+    [Fact]
+    public async Task Notices_are_projected_newest_first_with_utc_sent_at()
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Application Sent", At(1));
+        await SeedNotice(userId, "inbox-2", "Beta", null, "Rejected", At(3));
+        await SeedNotice(userId, "inbox-3", "Northwind Freight", "Data Analyst", "Interviewing", At(2));
+        _db.ChangeTracker.Clear();
+
+        var page = await _notices.LoadAsync(userId, CancellationToken.None);
+
+        Assert.NotNull(page);
+        Assert.Equal(["Beta", "Northwind Freight", "Acme"], page.Notices.Select(n => n.Company));
+        var beta = page.Notices[0];
+        Assert.Null(beta.Role);
+        Assert.Equal("Rejected", beta.Status);
+        Assert.Equal(At(3), beta.SentAt);
+        Assert.Equal(DateTimeKind.Utc, beta.SentAt.Kind);
+        var northwind = page.Notices[1];
+        Assert.Equal("Data Analyst", northwind.Role);
+        Assert.Equal("Interviewing", northwind.Status);
+        Assert.All(page.Notices, n => Assert.Equal(DateTimeKind.Utc, n.SentAt.Kind));
+
+        var stored = await _db.ApplicationNotices.Select(n => new { n.MessageId, n.Id }).ToListAsync();
+        Assert.Equal(stored.Single(n => n.MessageId == "inbox-2").Id, beta.Id);
+    }
+
+    [Fact]
+    public async Task Notices_sent_at_the_same_time_are_ordered_by_id_descending()
+    {
+        var userId = await SeedUser("ada@example.com");
+        for (var i = 1; i <= 5; i++)
+            await SeedNotice(userId, $"inbox-{i}", $"Company {i}", null, "Application Sent", At(1));
+        _db.ChangeTracker.Clear();
+
+        var page = await _notices.LoadAsync(userId, CancellationToken.None);
+
+        var expected = (await _db.ApplicationNotices.Select(n => n.Id).ToListAsync()).OrderDescending();
+        Assert.Equal(expected, page!.Notices.Select(n => n.Id));
+    }
+
+    [Fact]
+    public async Task Only_the_persons_live_notices_are_returned()
+    {
+        var ada = await SeedUser("ada@example.com");
+        var grace = await SeedUser("grace@example.com");
+        await SeedNotice(ada, "inbox-1", "Acme", "Engineer", "Application Sent", At(1));
+        await SeedNotice(grace, "inbox-1", "Globex", "Designer", "Rejected", At(2));
+        await SeedNotice(ada, "inbox-2", "Deleted Co", null, "Rejected", At(3));
+        await _db.Database.ExecuteSqlRawAsync(
+            "UPDATE application_notices SET DeletedAt = {0} WHERE Company = 'Deleted Co'", DateTime.UtcNow);
+        _db.ChangeTracker.Clear();
+
+        var page = await _notices.LoadAsync(ada, CancellationToken.None);
+
+        Assert.Equal("ada@example.com", page!.Email);
+        Assert.Equal(["Acme"], page.Notices.Select(n => n.Company));
+    }
+
+    [Fact]
+    public async Task Content_is_not_read()
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Application Sent", At(1));
+        _db.ChangeTracker.Clear();
+        _commands.Texts.Clear();
+
+        await _notices.LoadAsync(userId, CancellationToken.None);
+
+        Assert.NotEmpty(_commands.Texts);
+        Assert.All(_commands.Texts, sql => Assert.DoesNotContain("Content", sql));
+    }
+
+    [Fact]
+    public async Task Wire_json_has_only_the_contract_fields()
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", null, "Interviewing", new DateTime(2026, 11, 3, 14, 22, 5, DateTimeKind.Utc));
+        _db.ChangeTracker.Clear();
+
+        var page = await _notices.LoadAsync(userId, CancellationToken.None);
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(page, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+
+        var root = json.RootElement;
+        Assert.Equal(["email", "notices"], root.EnumerateObject().Select(p => p.Name));
+        var notice = Assert.Single(root.GetProperty("notices").EnumerateArray());
+        Assert.Equal(["id", "company", "role", "status", "sentAt"], notice.EnumerateObject().Select(p => p.Name));
+        Assert.Equal(JsonValueKind.Null, notice.GetProperty("role").ValueKind);
+        Assert.Equal("2026-11-03T14:22:05Z", notice.GetProperty("sentAt").GetString());
+        Assert.Equal(page!.Notices[0].Id.ToString("D"), notice.GetProperty("id").GetString());
+    }
+
+    [Fact]
+    public async Task Endpoint_without_a_session_is_401_and_leaves_cookies_alone()
+    {
+        var ctx = new DefaultHttpContext();
+
+        var result = await NoticesEndpoint.GetAsync(ctx, _session, _notices, CancellationToken.None);
+
+        Assert.IsType<UnauthorizedHttpResult>(result);
+        Assert.Equal(0, ctx.Response.Headers.SetCookie.Count);
+    }
+
+    [Fact]
+    public async Task Endpoint_with_an_unreadable_session_is_401_and_leaves_cookies_alone()
+    {
+        var ctx = new DefaultHttpContext();
+        ctx.Request.Headers.Cookie = "apptrack_session=forged";
+
+        var result = await NoticesEndpoint.GetAsync(ctx, _session, _notices, CancellationToken.None);
+
+        Assert.IsType<UnauthorizedHttpResult>(result);
+        Assert.Equal(0, ctx.Response.Headers.SetCookie.Count);
+    }
+
+    [Fact]
+    public async Task Endpoint_for_a_missing_person_is_401_and_clears_the_session()
+    {
+        var ctx = WithSession(Guid.CreateVersion7());
+
+        var result = await NoticesEndpoint.GetAsync(ctx, _session, _notices, CancellationToken.None);
+
+        Assert.IsType<UnauthorizedHttpResult>(result);
+        var header = Assert.Single(ctx.Response.Headers.SetCookie.ToArray())!;
+        Assert.StartsWith("apptrack_session=;", header);
+        Assert.Contains("path=/api", header);
+    }
+
+    [Fact]
+    public async Task Endpoint_for_a_live_person_is_200_and_not_cached()
+    {
+        var userId = await SeedUser("ada@example.com");
+        var ctx = WithSession(userId);
+
+        var result = await NoticesEndpoint.GetAsync(ctx, _session, _notices, CancellationToken.None);
+
+        var ok = Assert.IsType<Ok<NoticesPage>>(result);
+        Assert.Equal("ada@example.com", ok.Value!.Email);
+        Assert.Equal("no-store", ctx.Response.Headers.CacheControl.ToString());
+        Assert.Equal(0, ctx.Response.Headers.SetCookie.Count);
+    }
+
+    public void Dispose()
+    {
+        _db.Dispose();
+        _connection.Dispose();
+    }
+
+    private DefaultHttpContext WithSession(Guid userId)
+    {
+        var issued = new DefaultHttpContext();
+        _session.Issue(issued.Response, userId);
+        var pair = issued.Response.Headers.SetCookie.ToString().Split(';')[0];
+
+        var ctx = new DefaultHttpContext();
+        ctx.Request.Headers.Cookie = pair;
+        return ctx;
+    }
+
+    private static DateTime At(int day) => new(2026, 11, day, 9, 0, 0, DateTimeKind.Utc);
+
+    private async Task<Guid> SeedUser(string email)
+    {
+        var id = Guid.CreateVersion7();
+        _db.Users.Add(new User(id, email, "gmail", DateTime.UtcNow));
+        await _db.SaveChangesAsync();
+        return id;
+    }
+
+    private async Task SeedNotice(Guid userId, string messageId, string company, string? role, string status, DateTime sentAt)
+    {
+        _db.ApplicationNotices.Add(new ApplicationNotice(userId, messageId, company, role, status, sentAt, "body"));
+        await _db.SaveChangesAsync();
+    }
+
+    private sealed class CommandLog : DbCommandInterceptor
+    {
+        public List<string> Texts { get; } = [];
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+            DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            Texts.Add(command.CommandText);
+            return base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
+        }
+    }
+}

@@ -21,7 +21,7 @@ An inbound email that reports the status of exactly one candidacy at a known Com
 _Avoid_: confirmation, job alert, no-reply, job notice
 
 **Sent at**:
-The time an Application Notice was sent to the person, taken from the mail's Date header.
+The time an Application Notice was sent to the person, taken from the mail's Date header. When that header is missing or cannot be read, the time the notice was read is recorded instead.
 _Avoid_: received at, internal date
 
 ## Status

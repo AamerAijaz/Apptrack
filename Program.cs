@@ -1,5 +1,6 @@
 using Apptrack.Auth;
 using Apptrack.Data;
+using Apptrack.Endpoints;
 using Apptrack.Entities;
 using Apptrack.Services;
 using Apptrack.Services.NoticeExtraction;
@@ -9,6 +10,7 @@ using Google.Apis.Auth.OAuth2.Requests;
 using Google.Apis.Gmail.v1;
 using Google.Apis.Services;
 using Google.Apis.Util.Store;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 
 DotNetEnv.Env.Load();
@@ -46,6 +48,11 @@ builder.Services.AddSingleton<IApplicationNoticeExtractor>(sp =>
         sp.GetRequiredService<IConfiguration>(),
         logger: sp.GetRequiredService<ILogger<AiNoticeExtractor>>()));
 builder.Services.AddScoped<GmailSyncService>();
+builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddDataProtection();
+builder.Services.AddSingleton(WebPages.FromConfiguration(builder.Configuration));
+builder.Services.AddSingleton<SessionCookie>();
+builder.Services.AddScoped<NoticesService>();
 
 var app = builder.Build();
 var flow = app.Services.GetRequiredService<ApptrackAuthorizationCodeFlow>();
@@ -53,13 +60,7 @@ var flow = app.Services.GetRequiredService<ApptrackAuthorizationCodeFlow>();
 app.MapGet("/api/auth", (HttpContext ctx) =>
 {
     var state = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
-    ctx.Response.Cookies.Append("oauth_state", state, new CookieOptions
-    {
-        HttpOnly = true,
-        Secure = true,
-        SameSite = SameSiteMode.Lax,
-        MaxAge = TimeSpan.FromMinutes(10),
-    });
+    ctx.Response.Cookies.Append("oauth_state", state, SessionCookie.Options(TimeSpan.FromMinutes(10)));
 
     var url = new GoogleAuthorizationCodeRequestUrl(new Uri(GoogleAuthConsts.AuthorizationUrl))
     {
@@ -74,7 +75,7 @@ app.MapGet("/api/auth", (HttpContext ctx) =>
     return Results.Redirect(url.AbsoluteUri);
 });
 
-app.MapGet("/api/auth/callback", async (string? code, string? state, string? error, HttpContext ctx, AppDbContext db, GmailSyncService sync) =>
+app.MapGet("/api/auth/callback", async (string? code, string? state, string? error, HttpContext ctx, AppDbContext db, GmailSyncService sync, SessionCookie session, WebPages pages) =>
 {
     try
     {
@@ -84,7 +85,7 @@ app.MapGet("/api/auth/callback", async (string? code, string? state, string? err
         var expectedState = ctx.Request.Cookies["oauth_state"];
         if (string.IsNullOrEmpty(expectedState) || state != expectedState)
             throw new Exception("Invalid OAuth State");
-        ctx.Response.Cookies.Delete("oauth_state");
+        ctx.Response.Cookies.Delete("oauth_state", SessionCookie.DeleteOptions());
 
         // By default the GoogleAuthorizationCodeFlow stores the token in the DataStore if provided.
         // Here, we exchange the code for the token without storing.
@@ -155,14 +156,17 @@ app.MapGet("/api/auth/callback", async (string? code, string? state, string? err
         }
 
         await sync.StartWatchAsync(user.Id);
-        return Results.Redirect("/api/auth/success");
+        session.Issue(ctx.Response, user.Id);
+        return Results.Redirect(pages.Notices.AbsoluteUri);
     }
     catch (Exception ex)
     {
         Console.Error.WriteLine($"Error during oauth callback: {ex}");
-        return Results.Redirect("/api/auth/failure");
+        return Results.Redirect(pages.ConnectFailed.AbsoluteUri);
     }
 });
+
+app.MapNotices();
 
 app.MapPost("/api/applications/gmail/webhook", async (PubSubPush push, GmailSyncService sync) =>
 {
