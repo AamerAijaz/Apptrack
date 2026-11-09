@@ -166,14 +166,42 @@ public sealed class LexiconNoticeExtractorTests
     }
 
     [Fact]
+    public async Task An_offer_that_mentions_an_interview_is_accepted()
+    {
+        var notice = await Read("""
+            From: Acme Careers <jobs@acme.com>
+            Subject: Your offer
+            Date: Tue, 03 Nov 2026 14:30:00 +0000
+
+            We are pleased to offer you the role. The last interview went well.
+            """);
+
+        AssertNotice(notice, "Acme Careers", ApplicationRole.Unnamed, ApplicationStatus.Accepted, SentAt);
+    }
+
+    [Fact]
+    public async Task An_acknowledgement_that_says_we_offer_stays_application_sent()
+    {
+        var notice = await Read("""
+            From: Acme Careers <jobs@acme.com>
+            Subject: Thanks for applying
+            Date: Tue, 03 Nov 2026 14:30:00 +0000
+
+            We offer competitive benefits and will write soon.
+            """);
+
+        AssertNotice(notice, "Acme Careers", ApplicationRole.Unnamed, ApplicationStatus.ApplicationSent, SentAt);
+    }
+
+    [Fact]
     public async Task An_offer_and_a_rejection_together_are_not_a_notice()
     {
         var notice = await Read("""
             From: Acme Careers <jobs@acme.com>
-            Subject: Offer
+            Subject: Your offer
             Date: Tue, 03 Nov 2026 14:30:00 +0000
 
-            We are not moving forward and cannot offer you the role.
+            We are not moving forward and the offer letter no longer stands.
             """);
 
         Assert.Null(notice);

@@ -29,7 +29,11 @@ public sealed partial class LexiconNoticeExtractor : IApplicationNoticeExtractor
 
     private static readonly string[] AcceptedPhrases =
     [
-        "offer",
+        "pleased to offer",
+        "offer of employment",
+        "job offer",
+        "offer letter",
+        "your offer",
     ];
 
     private static readonly string[] RejectedPhrases =
@@ -99,10 +103,10 @@ public sealed partial class LexiconNoticeExtractor : IApplicationNoticeExtractor
 
         if (rejected)
             status = ApplicationStatus.Rejected;
-        else if (interviewing)
-            status = ApplicationStatus.Interviewing;
         else if (accepted)
             status = ApplicationStatus.Accepted;
+        else if (interviewing)
+            status = ApplicationStatus.Interviewing;
         else if (acknowledged)
             status = ApplicationStatus.ApplicationSent;
         else
