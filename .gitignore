@@ -218,3 +218,4 @@ web/.cert/
 
 node_modules/
 .scratch
+.creds
