@@ -1,4 +1,4 @@
-import { loadNotices } from "./loadNotices";
+import { getNotices, loadBoard } from "./loadNotices";
 import { REMEMBERED_PROFILE_KEY } from "../auth/loadSessionProfile";
 
 afterEach(() => {
@@ -6,11 +6,11 @@ afterEach(() => {
   localStorage.clear();
 });
 
-test("the only request is GET /api/notices as JSON", async () => {
+test("the board request is GET /api/notices as JSON", async () => {
   const cookie = vi.spyOn(document, "cookie", "get");
-  const fetchSpy = mockJson(200, { email: "ada@gmail.com", notices: [] });
+  const fetchSpy = mockJson(200, board());
 
-  await loadNotices();
+  await loadBoard();
 
   expect(fetchSpy).toHaveBeenCalledTimes(1);
   expect(fetchSpy).toHaveBeenCalledWith(
@@ -23,128 +23,137 @@ test("the only request is GET /api/notices as JSON", async () => {
   expect(cookie).not.toHaveBeenCalled();
 });
 
-test("401 is signed out, even when the body is not JSON", async () => {
+test("401 is signed out and forgets the remembered profile", async () => {
   localStorage.setItem(
     REMEMBERED_PROFILE_KEY,
     JSON.stringify({ email: "ada@gmail.com", picture: null, savedAt: Date.now() }),
   );
   vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("nope", { status: 401 }));
 
-  await expect(loadNotices()).resolves.toEqual({ kind: "signed-out" });
+  await expect(loadBoard()).resolves.toEqual({ kind: "signed-out" });
   expect(localStorage.getItem(REMEMBERED_PROFILE_KEY)).toBeNull();
 });
 
-test("200 with an empty notices array is an empty inbox", async () => {
-  mockJson(200, { email: "ada@gmail.com", notices: [] });
+test("200 with four empty lanes is a ready board", async () => {
+  mockJson(200, board());
 
-  await expect(loadNotices()).resolves.toEqual({
-    kind: "empty",
-    email: "ada@gmail.com",
-  });
-});
-
-test("200 with notices groups them in status-list order without sorting", async () => {
-  mockJson(200, {
-    email: "ada@gmail.com",
-    notices: [
-      notice({
-        id: "0192f3a4-5b6c-7d8e-9f01-23456789ab01",
-        status: "Rejected",
-        sentAt: "2026-11-05T09:00:00Z",
-        company: "Closed Co",
-        role: null,
-      }),
-      notice({
-        id: "0192f3a4-5b6c-7d8e-9f01-23456789ab02",
-        status: "Application Sent",
-        sentAt: "2026-11-01T09:00:00Z",
-        company: "Earlier Co",
-      }),
-      notice({
-        id: "0192f3a4-5b6c-7d8e-9f01-23456789ab03",
-        status: "Interviewing",
-        sentAt: "2026-11-03T14:22:05Z",
-      }),
-      notice({
-        id: "0192f3a4-5b6c-7d8e-9f01-23456789ab04",
-        status: "Application Sent",
-        sentAt: "2026-11-04T09:00:00Z",
-        company: "Later Co",
-      }),
-    ],
-  });
-
-  const result = await loadNotices();
+  const result = await loadBoard();
 
   expect(result.kind).toBe("ready");
   if (result.kind !== "ready") return;
   expect(result.email).toBe("ada@gmail.com");
-  expect(result.groups.map((group) => group.label)).toEqual([
+  expect(result.lanes.map((lane) => lane.status)).toEqual([
     "Application Sent",
     "Interviewing",
+    "Accepted",
     "Rejected",
   ]);
-  expect(result.groups.map((group) => group.tone)).toEqual(["sent", "interviewing", "rejected"]);
-  expect(result.groups[0].notices.map((item) => item.company)).toEqual(["Earlier Co", "Later Co"]);
-  expect(result.groups[1].notices.map((item) => item.id)).toEqual([
-    "0192f3a4-5b6c-7d8e-9f01-23456789ab03",
-  ]);
-  expect(result.groups[1].notices[0].sentAt.toISOString()).toBe("2026-11-03T14:22:05.000Z");
-  expect(result.groups[1].notices[0].role).toBe("Data Analyst");
-  expect(result.groups[2].notices[0].role).toBeNull();
+  expect(result.lanes.every((lane) => lane.notices.length === 0)).toBe(true);
+});
+
+test("cards stay in lane order and drop a status field", async () => {
+  mockJson(200, board({
+    0: [
+      card({ id: "0192f3a4-5b6c-7d8e-9f01-23456789ab02", company: "Earlier Co", sentAt: "2026-11-04T16:40:00Z" }),
+      card({ id: "0192f3a4-5b6c-7d8e-9f01-23456789ab01", company: "Later Co", role: null, sentAt: "2026-11-01T08:15:00Z" }),
+    ],
+  }));
+
+  const result = await loadBoard();
+  if (result.kind !== "ready") throw new Error("expected a board");
+
+  expect(result.lanes[0].notices.map((notice) => notice.company)).toEqual(["Earlier Co", "Later Co"]);
+  expect(result.lanes[0].notices[1].role).toBeNull();
+  expect(result.lanes[0].notices[1].sentAt.toISOString()).toBe("2026-11-01T08:15:00.000Z");
+});
+
+test("a lane page asks for that status, limit, and offset", async () => {
+  const fetchSpy = mockJson(200, {
+    email: "ada@gmail.com",
+    status: "Accepted",
+    limit: 12,
+    notices: [card({ company: "Offered Co" })],
+  });
+
+  const result = await getNotices("Accepted", 12, 24);
+
+  expect(fetchSpy).toHaveBeenCalledWith(
+    "/api/notices/lane?application_status=Accepted&limit=12&offset=24",
+    expect.anything(),
+  );
+  if (result.kind !== "ready") throw new Error("expected a page");
+  expect(result.notices.map((notice) => notice.company)).toEqual(["Offered Co"]);
+  expect(result.limit).toBe(12);
 });
 
 test.each([
-  ["another status", 500, { email: "ada@gmail.com", notices: [] }],
-  ["a missing email", 200, { notices: [] }],
-  ["a blank email", 200, { email: "  ", notices: [] }],
-  ["a notices object", 200, { email: "ada@gmail.com", notices: {} }],
-  ["an empty company", 200, { email: "ada@gmail.com", notices: [notice({ company: "  " })] }],
-  ["an empty role", 200, { email: "ada@gmail.com", notices: [notice({ role: "" })] }],
-  ["a missing role", 200, { email: "ada@gmail.com", notices: [notice({ role: undefined })] }],
-  ["an unknown status", 200, { email: "ada@gmail.com", notices: [notice({ status: "Hired" })] }],
-  ["a bad date", 200, { email: "ada@gmail.com", notices: [notice({ sentAt: "2026-02-31T00:00:00Z" })] }],
-  ["a non-UTC date", 200, { email: "ada@gmail.com", notices: [notice({ sentAt: "2026-11-03T14:22:05+00:00" })] }],
-  ["an uppercase id", 200, { email: "ada@gmail.com", notices: [notice({ id: "0192F3A4-5B6C-7D8E-9F01-23456789ABCD" })] }],
-])("%s fails the whole response", async (_name, status, body) => {
-  mockJson(status, body);
-
-  await expect(loadNotices()).resolves.toEqual({ kind: "failed" });
+  ["notices that are not a list", boardWithNotices({})],
+  ["a missing email", { lanes: emptyLanes() }],
+  ["the wrong lane order", board({ swap: true })],
+  ["an unknown status", board({ status: "Hired" })],
+  ["a bad date", board({ sentAt: "2026-02-31T00:00:00Z" })],
+])("%s fails the whole response", async (_name, body) => {
+  mockJson(200, body);
+  await expect(loadBoard()).resolves.toEqual({ kind: "failed" });
 });
 
-test("a non-JSON body fails", async () => {
-  vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("not-json", { status: 200 }));
-
-  await expect(loadNotices()).resolves.toEqual({ kind: "failed" });
-});
-
-test("a network error fails", async () => {
-  vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
-
-  await expect(loadNotices()).resolves.toEqual({ kind: "failed" });
-});
-
-test("an aborted request is not turned into a failed load", async () => {
-  vi.spyOn(globalThis, "fetch").mockRejectedValue(new DOMException("aborted", "AbortError"));
-
-  await expect(loadNotices()).rejects.toMatchObject({ name: "AbortError" });
-});
-
-test("one unknown status drops the whole ready result", async () => {
+test("a lane page longer than its limit fails that page", async () => {
   mockJson(200, {
     email: "ada@gmail.com",
-    notices: [notice(), notice({ id: "0192f3a4-5b6c-7d8e-9f01-23456789ab09", status: "In review" })],
+    status: "Accepted",
+    limit: 1,
+    notices: [card(), card({ id: "0192f3a4-5b6c-7d8e-9f01-23456789ab09" })],
   });
-
-  await expect(loadNotices()).resolves.toEqual({ kind: "failed" });
+  await expect(getNotices("Accepted", 1, 0)).resolves.toEqual({ kind: "failed" });
 });
 
-function notice(overrides: Record<string, unknown> = {}) {
+test("a non-200 lane page fails that page only", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 400 }));
+  await expect(getNotices("Rejected", 12, 0)).resolves.toEqual({ kind: "failed" });
+});
+
+test("unmount is not this module's job, but abort throws", async () => {
+  vi.spyOn(globalThis, "fetch").mockRejectedValue(new DOMException("aborted", "AbortError"));
+  await expect(loadBoard()).rejects.toMatchObject({ name: "AbortError" });
+});
+
+function boardWithNotices(notices: unknown) {
+  const lanes = emptyLanes();
+  return { email: "ada@gmail.com", lanes: [{ ...lanes[0], notices }, ...lanes.slice(1)] };
+}
+
+function emptyLanes() {
+  return ["Application Sent", "Interviewing", "Accepted", "Rejected"].map((status) => ({
+    status,
+    limit: 12,
+    notices: [] as ReturnType<typeof card>[],
+  }));
+}
+
+function board(overrides: Record<string, unknown> = {}) {
+  if ("lanes" in overrides || "swap" in overrides || "status" in overrides || "sentAt" in overrides) {
+    if (overrides.lanes !== undefined) return { email: "ada@gmail.com", ...overrides };
+    const lanes = emptyLanes();
+    if (overrides.swap === true) lanes.reverse();
+    if (typeof overrides.status === "string") lanes[0].status = overrides.status;
+    if (typeof overrides.sentAt === "string") {
+      lanes[0].notices = [card({ sentAt: overrides.sentAt })];
+    }
+    return { email: "ada@gmail.com", lanes };
+  }
+
+  const lanes = emptyLanes();
+  for (const [index, notices] of Object.entries(overrides)) {
+    lanes[Number(index)].notices = notices as ReturnType<typeof card>[];
+  }
+  return { email: "ada@gmail.com", lanes };
+}
+
+function card(overrides: Record<string, unknown> = {}) {
   return {
     id: "0192f3a4-5b6c-7d8e-9f01-23456789abcd",
     company: "Northwind Freight",
     role: "Data Analyst",
-    status: "Interviewing",
     sentAt: "2026-11-03T14:22:05Z",
     ...overrides,
   };

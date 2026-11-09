@@ -279,8 +279,9 @@ public sealed partial class AiNoticeExtractor(
                 Status is exactly one of: {{statuses}}.
                 Application Sent includes a submission acknowledgement, including "thanks for applying" and "your application is under review".
                 Interviewing is a screen, an interview, or a task.
+                Accepted means the employer has made an offer.
                 Rejected means the employer has ended the candidacy.
-                Job alerts, newsletters, verification codes, offers, on hold, and withdrawn are not application notices.
+                Job alerts, newsletters, verification codes, on hold, and withdrawn are not application notices.
                 Do not include the time the mail was sent. That is read from the Date header.
                 There is no sender filter and no list of recruiting systems.
                 """;

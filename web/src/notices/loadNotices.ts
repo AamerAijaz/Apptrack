@@ -1,9 +1,10 @@
 import { forgetProfile } from "../auth/loadSessionProfile";
-import { groupByStatus, parseStatus, type NoticeStatus, type StatusGroup } from "./statuses";
+import { NOTICE_STATUSES, parseStatus, toneFor, type NoticeStatus, type NoticeTone } from "./statuses";
 
 export const NOTICES_PATH = "/notices";
 
-const NOTICES_API = "/api/notices";
+const BOARD_API = "/api/notices";
+const LANE_API = "/api/notices/lane";
 
 const GUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -11,32 +12,65 @@ const GUID =
 const SENT_AT =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z$/;
 
-export type Notice = {
+export type NoticeCard = {
   readonly id: string;
   readonly company: string;
   readonly role: string | null;
-  readonly status: NoticeStatus;
   readonly sentAt: Date;
 };
 
-export type NoticesResult =
+export type NoticeLane = {
+  readonly status: NoticeStatus;
+  readonly tone: NoticeTone;
+  readonly notices: readonly NoticeCard[];
+  readonly limit: number;
+};
+
+export type BoardResult =
   | { kind: "signed-out" }
   | { kind: "failed" }
-  | { kind: "empty"; email: string }
-  | { kind: "ready"; email: string; groups: readonly StatusGroup<Notice>[] };
+  | { kind: "ready"; email: string; lanes: readonly NoticeLane[] };
 
-type NoticeDraft = {
-  readonly id: string;
-  readonly company: string;
-  readonly role: string | null;
-  readonly status: string;
-  readonly sentAt: Date;
-};
+export type LanePageResult =
+  | { kind: "signed-out" }
+  | { kind: "failed" }
+  | { kind: "ready"; email: string; status: NoticeStatus; notices: readonly NoticeCard[]; limit: number };
 
-export async function loadNotices(signal?: AbortSignal): Promise<NoticesResult> {
+export async function loadBoard(signal?: AbortSignal): Promise<BoardResult> {
+  const response = await request(BOARD_API, signal);
+  if (response.kind !== "ok") return response;
+
+  const parsed = parseBoard(response.body);
+  if (parsed === null) return { kind: "failed" };
+  return { kind: "ready", email: parsed.email, lanes: parsed.lanes };
+}
+
+export async function getNotices(
+  status: NoticeStatus,
+  limit: number,
+  offset: number,
+  signal?: AbortSignal,
+): Promise<LanePageResult> {
+  const params = new URLSearchParams({
+    application_status: status,
+    limit: String(limit),
+    offset: String(offset),
+  });
+  const response = await request(`${LANE_API}?${params}`, signal);
+  if (response.kind !== "ok") return response;
+
+  const parsed = parseLane(response.body, status);
+  if (parsed === null) return { kind: "failed" };
+  return parsed;
+}
+
+async function request(
+  url: string,
+  signal?: AbortSignal,
+): Promise<{ kind: "ok"; body: unknown } | { kind: "signed-out" } | { kind: "failed" }> {
   let response: Response;
   try {
-    response = await fetch(NOTICES_API, {
+    response = await fetch(url, {
       method: "GET",
       headers: { Accept: "application/json" },
       signal,
@@ -52,69 +86,66 @@ export async function loadNotices(signal?: AbortSignal): Promise<NoticesResult> 
   }
   if (response.status !== 200) return { kind: "failed" };
 
-  let body: unknown;
   try {
-    body = await response.json();
+    return { kind: "ok", body: await response.json() };
   } catch (error) {
     if (isAbortError(error)) throw error;
     return { kind: "failed" };
   }
-
-  const parsed = parsePayload(body);
-  if (parsed === null) return { kind: "failed" };
-  if (parsed.notices.length === 0) return { kind: "empty", email: parsed.email };
-
-  const groups = groupByStatus(parsed.notices);
-  if (groups === null) return { kind: "failed" };
-
-  return {
-    kind: "ready",
-    email: parsed.email,
-    groups: groups.map((group) => ({
-      label: group.label,
-      tone: group.tone,
-      notices: group.notices.map((notice) => ({
-        id: notice.id,
-        company: notice.company,
-        role: notice.role,
-        status: group.label,
-        sentAt: notice.sentAt,
-      })),
-    })),
-  };
 }
 
-function parsePayload(value: unknown): { email: string; notices: NoticeDraft[] } | null {
+function parseBoard(value: unknown): { email: string; lanes: NoticeLane[] } | null {
   if (!isRecord(value)) return null;
   const email = parseEmail(value.email);
-  if (email === null) return null;
-  if (!Array.isArray(value.notices)) return null;
+  if (email === null || !Array.isArray(value.lanes) || value.lanes.length !== NOTICE_STATUSES.length) {
+    return null;
+  }
 
-  const notices: NoticeDraft[] = [];
+  const lanes: NoticeLane[] = [];
+  for (let index = 0; index < NOTICE_STATUSES.length; index += 1) {
+    const expected = NOTICE_STATUSES[index].label;
+    const lane = parseLaneRecord(value.lanes[index], expected);
+    if (lane === null) return null;
+    lanes.push(lane);
+  }
+  return { email, lanes };
+}
+
+function parseLane(value: unknown, expected: NoticeStatus): LanePageResult | null {
+  if (!isRecord(value)) return null;
+  const email = parseEmail(value.email);
+  const lane = parseLaneRecord(value, expected);
+  if (email === null || lane === null) return null;
+  return { kind: "ready", email, status: lane.status, notices: lane.notices, limit: lane.limit };
+}
+
+function parseLaneRecord(value: unknown, expected: NoticeStatus): NoticeLane | null {
+  if (!isRecord(value)) return null;
+  if (parseStatus(value.status) !== expected) return null;
+  if (!Array.isArray(value.notices)) return null;
+  if (typeof value.limit !== "number" || !Number.isInteger(value.limit) || value.limit < 1) return null;
+  if (value.notices.length > value.limit) return null;
+
+  const notices: NoticeCard[] = [];
   for (const item of value.notices) {
-    const notice = parseNotice(item);
+    const notice = parseCard(item);
     if (notice === null) return null;
     notices.push(notice);
   }
-  return { email, notices };
+
+  return { status: expected, tone: toneFor(expected), notices, limit: value.limit };
 }
 
-function parseNotice(value: unknown): NoticeDraft | null {
+function parseCard(value: unknown): NoticeCard | null {
   if (!isRecord(value)) return null;
   if (typeof value.id !== "string" || !GUID.test(value.id)) return null;
-
   const company = parseCompany(value.company);
   if (company === null) return null;
-
   const role = parseRole(value.role);
   if (role === undefined) return null;
-
-  if (typeof value.status !== "string" || parseStatus(value.status) === null) return null;
-
   const sentAt = parseSentAt(value.sentAt);
   if (sentAt === null) return null;
-
-  return { id: value.id, company, role, status: value.status, sentAt };
+  return { id: value.id, company, role, sentAt };
 }
 
 function parseEmail(value: unknown): string | null {

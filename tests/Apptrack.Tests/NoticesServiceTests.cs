@@ -39,7 +39,7 @@ public sealed class NoticesServiceTests : IDisposable
     [Fact]
     public async Task Unknown_person_is_null()
     {
-        Assert.Null(await _notices.LoadAsync(Guid.CreateVersion7(), CancellationToken.None));
+        Assert.Null(await _notices.GetNotices(Guid.CreateVersion7(), NoticeStatus.ApplicationSent, 12, 0, CancellationToken.None));
     }
 
     [Fact]
@@ -51,7 +51,7 @@ public sealed class NoticesServiceTests : IDisposable
         await _db.SaveChangesAsync();
         _db.ChangeTracker.Clear();
 
-        Assert.Null(await _notices.LoadAsync(userId, CancellationToken.None));
+        Assert.Null(await _notices.GetNotices(userId, NoticeStatus.ApplicationSent, 12, 0, CancellationToken.None));
     }
 
     [Fact]
@@ -59,7 +59,7 @@ public sealed class NoticesServiceTests : IDisposable
     {
         var userId = await SeedUser("ada@example.com");
 
-        var page = await _notices.LoadAsync(userId, CancellationToken.None);
+        var page = await _notices.GetNotices(userId, NoticeStatus.ApplicationSent, 12, 0, CancellationToken.None);
 
         Assert.NotNull(page);
         Assert.Equal("ada@example.com", page.Email);
@@ -71,26 +71,24 @@ public sealed class NoticesServiceTests : IDisposable
     {
         var userId = await SeedUser("ada@example.com");
         await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Application Sent", At(1));
-        await SeedNotice(userId, "inbox-2", "Beta", null, "Rejected", At(3));
+        await SeedNotice(userId, "inbox-2", "Beta", null, "Application Sent", At(3));
         await SeedNotice(userId, "inbox-3", "Northwind Freight", "Data Analyst", "Interviewing", At(2));
         _db.ChangeTracker.Clear();
 
-        var page = await _notices.LoadAsync(userId, CancellationToken.None);
+        var page = await _notices.GetNotices(userId, NoticeStatus.ApplicationSent, 12, 0, CancellationToken.None);
 
         Assert.NotNull(page);
-        Assert.Equal(["Beta", "Northwind Freight", "Acme"], page.Notices.Select(n => n.Company));
+        Assert.Equal(["Beta", "Acme"], page.Notices.Select(n => n.Company));
         var beta = page.Notices[0];
         Assert.Null(beta.Role);
-        Assert.Equal("Rejected", beta.Status);
         Assert.Equal(At(3), beta.SentAt);
         Assert.Equal(DateTimeKind.Utc, beta.SentAt.Kind);
-        var northwind = page.Notices[1];
-        Assert.Equal("Data Analyst", northwind.Role);
-        Assert.Equal("Interviewing", northwind.Status);
         Assert.All(page.Notices, n => Assert.Equal(DateTimeKind.Utc, n.SentAt.Kind));
 
-        var stored = await _db.ApplicationNotices.Select(n => new { n.MessageId, n.Id }).ToListAsync();
-        Assert.Equal(stored.Single(n => n.MessageId == "inbox-2").Id, beta.Id);
+        var interviewing = await _notices.GetNotices(userId, NoticeStatus.Interviewing, 12, 0, CancellationToken.None);
+        var northwind = Assert.Single(interviewing!.Notices);
+        Assert.Equal("Northwind Freight", northwind.Company);
+        Assert.Equal("Data Analyst", northwind.Role);
     }
 
     [Fact]
@@ -101,10 +99,19 @@ public sealed class NoticesServiceTests : IDisposable
             await SeedNotice(userId, $"inbox-{i}", $"Company {i}", null, "Application Sent", At(1));
         _db.ChangeTracker.Clear();
 
-        var page = await _notices.LoadAsync(userId, CancellationToken.None);
+        var first = await _notices.GetNotices(userId, NoticeStatus.ApplicationSent, 2, 0, CancellationToken.None);
+        var second = await _notices.GetNotices(userId, NoticeStatus.ApplicationSent, 2, 2, CancellationToken.None);
+        var third = await _notices.GetNotices(userId, NoticeStatus.ApplicationSent, 2, 4, CancellationToken.None);
 
-        var expected = (await _db.ApplicationNotices.Select(n => n.Id).ToListAsync()).OrderDescending();
-        Assert.Equal(expected, page!.Notices.Select(n => n.Id));
+        var expected = await _db.ApplicationNotices
+            .OrderByDescending(n => n.SentAt)
+            .ThenByDescending(n => n.Id)
+            .Select(n => n.Id)
+            .ToListAsync();
+        var paged = first!.Notices.Concat(second!.Notices).Concat(third!.Notices).Select(n => n.Id);
+        Assert.Equal(expected, paged);
+        Assert.Equal(2, first.Notices.Count);
+        Assert.Single(third.Notices);
     }
 
     [Fact]
@@ -114,12 +121,12 @@ public sealed class NoticesServiceTests : IDisposable
         var grace = await SeedUser("grace@example.com");
         await SeedNotice(ada, "inbox-1", "Acme", "Engineer", "Application Sent", At(1));
         await SeedNotice(grace, "inbox-1", "Globex", "Designer", "Rejected", At(2));
-        await SeedNotice(ada, "inbox-2", "Deleted Co", null, "Rejected", At(3));
+        await SeedNotice(ada, "inbox-2", "Deleted Co", null, "Application Sent", At(3));
         await _db.Database.ExecuteSqlRawAsync(
             "UPDATE application_notices SET DeletedAt = {0} WHERE Company = 'Deleted Co'", DateTime.UtcNow);
         _db.ChangeTracker.Clear();
 
-        var page = await _notices.LoadAsync(ada, CancellationToken.None);
+        var page = await _notices.GetNotices(ada, NoticeStatus.ApplicationSent, 12, 0, CancellationToken.None);
 
         Assert.Equal("ada@example.com", page!.Email);
         Assert.Equal(["Acme"], page.Notices.Select(n => n.Company));
@@ -133,7 +140,7 @@ public sealed class NoticesServiceTests : IDisposable
         _db.ChangeTracker.Clear();
         _commands.Texts.Clear();
 
-        await _notices.LoadAsync(userId, CancellationToken.None);
+        await _notices.GetNotices(userId, NoticeStatus.ApplicationSent, 12, 0, CancellationToken.None);
 
         Assert.NotEmpty(_commands.Texts);
         Assert.All(_commands.Texts, sql => Assert.DoesNotContain("Content", sql));
@@ -146,16 +153,23 @@ public sealed class NoticesServiceTests : IDisposable
         await SeedNotice(userId, "inbox-1", "Acme", null, "Interviewing", new DateTime(2026, 11, 3, 14, 22, 5, DateTimeKind.Utc));
         _db.ChangeTracker.Clear();
 
-        var page = await _notices.LoadAsync(userId, CancellationToken.None);
-        using var json = JsonDocument.Parse(JsonSerializer.Serialize(page, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        var ctx = WithSession(userId);
+        var result = await NoticesEndpoint.GetAsync(ctx, _session, _notices, CancellationToken.None);
+        var ok = Assert.IsType<Ok<NoticeBoardDto>>(result);
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(ok.Value, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
 
         var root = json.RootElement;
-        Assert.Equal(["email", "notices"], root.EnumerateObject().Select(p => p.Name));
-        var notice = Assert.Single(root.GetProperty("notices").EnumerateArray());
-        Assert.Equal(["id", "company", "role", "status", "sentAt"], notice.EnumerateObject().Select(p => p.Name));
+        Assert.Equal(["email", "lanes"], root.EnumerateObject().Select(p => p.Name));
+        var lanes = root.GetProperty("lanes").EnumerateArray().ToArray();
+        Assert.Equal(["Application Sent", "Interviewing", "Accepted", "Rejected"], lanes.Select(lane => lane.GetProperty("status").GetString()));
+        var interviewing = lanes[1];
+        Assert.Equal(["status", "notices", "limit"], interviewing.EnumerateObject().Select(p => p.Name));
+        Assert.Equal(12, interviewing.GetProperty("limit").GetInt32());
+        var notice = Assert.Single(interviewing.GetProperty("notices").EnumerateArray());
+        Assert.Equal(["id", "company", "role", "sentAt"], notice.EnumerateObject().Select(p => p.Name));
         Assert.Equal(JsonValueKind.Null, notice.GetProperty("role").ValueKind);
         Assert.Equal("2026-11-03T14:22:05Z", notice.GetProperty("sentAt").GetString());
-        Assert.Equal(page!.Notices[0].Id.ToString("D"), notice.GetProperty("id").GetString());
+        Assert.Equal(ok.Value!.Lanes[1].Notices[0].Id.ToString("D"), notice.GetProperty("id").GetString());
     }
 
     [Fact]
@@ -202,10 +216,41 @@ public sealed class NoticesServiceTests : IDisposable
 
         var result = await NoticesEndpoint.GetAsync(ctx, _session, _notices, CancellationToken.None);
 
-        var ok = Assert.IsType<Ok<NoticesPage>>(result);
+        var ok = Assert.IsType<Ok<NoticeBoardDto>>(result);
         Assert.Equal("ada@example.com", ok.Value!.Email);
+        Assert.Equal(4, ok.Value.Lanes.Count);
+        Assert.All(ok.Value.Lanes, lane => Assert.Empty(lane.Notices));
         Assert.Equal("no-store", ctx.Response.Headers.CacheControl.ToString());
         Assert.Equal(0, ctx.Response.Headers.SetCookie.Count);
+    }
+
+    [Fact]
+    public async Task Lane_with_a_bad_status_or_page_is_400_and_leaves_the_cookie()
+    {
+        var userId = await SeedUser("ada@example.com");
+        var ctx = WithSession(userId);
+
+        var result = await NoticesEndpoint.GetLaneAsync(
+            ctx, _session, _notices, "Hired", 12, 0, CancellationToken.None);
+
+        Assert.IsType<BadRequest>(result);
+        Assert.Equal(0, ctx.Response.Headers.SetCookie.Count);
+
+        var negative = await NoticesEndpoint.GetLaneAsync(
+            WithSession(userId), _session, _notices, "Accepted", 0, -1, CancellationToken.None);
+        Assert.IsType<BadRequest>(negative);
+    }
+
+    [Fact]
+    public async Task Lane_for_a_missing_person_is_401_and_clears_the_session()
+    {
+        var ctx = WithSession(Guid.CreateVersion7());
+
+        var result = await NoticesEndpoint.GetLaneAsync(
+            ctx, _session, _notices, "Accepted", 12, 0, CancellationToken.None);
+
+        Assert.IsType<UnauthorizedHttpResult>(result);
+        Assert.Contains("path=/api", Assert.Single(ctx.Response.Headers.SetCookie.ToArray())!);
     }
 
     public void Dispose()

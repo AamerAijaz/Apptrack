@@ -65,9 +65,14 @@ namespace apptrack.Migrations
                     b.HasIndex("UserId", "MessageId")
                         .IsUnique();
 
+                    b.HasIndex("UserId", "Status", "SentAt", "Id")
+                        .HasDatabaseName("IX_application_notices_lane")
+                        .HasFilter("\"DeletedAt\" IS NULL")
+                        .IsDescending(false, false, true, true);
+
                     b.ToTable("application_notices", null, t =>
                         {
-                            t.HasCheckConstraint("CK_application_notices_Status", "\"Status\" IN ('Application Sent', 'Interviewing', 'Rejected')");
+                            t.HasCheckConstraint("CK_application_notices_Status", "\"Status\" IN ('Application Sent', 'Interviewing', 'Accepted', 'Rejected')");
                         });
                 });
 

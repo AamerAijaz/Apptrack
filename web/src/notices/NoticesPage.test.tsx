@@ -1,6 +1,9 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
+import { REMEMBERED_PROFILE_KEY } from "../auth/loadSessionProfile";
 import { Landing } from "../Landing";
 import { NoticesPage } from "./NoticesPage";
+
+const PICTURE = "https://lh3.googleusercontent.com/a/ada";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -9,6 +12,47 @@ afterEach(() => {
 });
 
 test("shows a loading status until the request settles", async () => {
+  const pending: Array<{ url: string; resolve: (response: Response) => void }> = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+    const url = String(input);
+    return new Promise((resolve) => {
+      pending.push({ url, resolve });
+    });
+  });
+
+  const { container } = render(<NoticesPage />);
+
+  expect(screen.getByRole("status")).toHaveTextContent("Loading your notices.");
+  expect(container.querySelector(".profile--pending")).not.toBeNull();
+
+  for (const request of pending) {
+    request.resolve(request.url === "/api/session" ? sessionResponse() : jsonResponse(200, board()));
+  }
+
+  const photo = await screen.findByRole("img", { name: "ada@gmail.com" });
+  expect(photo).toHaveAttribute("src", PICTURE);
+  expect(photo.closest("a")).toHaveAttribute("href", "/notices");
+  expect(screen.queryByText(/Signed in as/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+});
+
+test("401 shows the signed-out message and Connect", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 401 }));
+
+  render(<NoticesPage />);
+
+  expect(await screen.findByText("You're not signed in.")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Connect" })).toHaveAttribute("href", "/api/auth");
+  expect(screen.getByRole("link", { name: "Connect to Gmail" })).toHaveAttribute("href", "/api/auth");
+  expect(screen.queryByText(/Signed in as/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("img")).not.toBeInTheDocument();
+});
+
+test("a remembered picture gives way when the board is signed out", async () => {
+  localStorage.setItem(
+    REMEMBERED_PROFILE_KEY,
+    JSON.stringify({ email: "ada@gmail.com", picture: PICTURE, savedAt: Date.now() }),
+  );
   let resolveFetch: ((response: Response) => void) | undefined;
   vi.spyOn(globalThis, "fetch").mockImplementation(
     () =>
@@ -19,27 +63,14 @@ test("shows a loading status until the request settles", async () => {
 
   render(<NoticesPage />);
 
-  expect(screen.getByRole("status")).toHaveTextContent("Loading your notices.");
+  expect(screen.getByRole("img", { name: "ada@gmail.com" })).toHaveAttribute("src", PICTURE);
 
-  resolveFetch?.(
-    jsonResponse(200, {
-      email: "ada@gmail.com",
-      notices: [],
-    }),
-  );
-
-  expect(await screen.findByText("Signed in as ada@gmail.com")).toBeInTheDocument();
-  expect(screen.queryByRole("status")).not.toBeInTheDocument();
-});
-
-test("401 shows the signed-out message and Connect Gmail", async () => {
-  vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 401 }));
-
-  render(<NoticesPage />);
+  resolveFetch?.(new Response(null, { status: 401 }));
 
   expect(await screen.findByText("You're not signed in.")).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: "Connect" })).toHaveAttribute("href", "/api/auth");
-  expect(screen.queryByText(/Signed in as/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("img")).not.toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Connect to Gmail" })).toBeInTheDocument();
+  expect(localStorage.getItem(REMEMBERED_PROFILE_KEY)).toBeNull();
 });
 
 test("a failed load offers a link back to /notices", async () => {
@@ -51,8 +82,8 @@ test("a failed load offers a link back to /notices", async () => {
   expect(screen.getByRole("link", { name: "Try again" })).toHaveAttribute("href", "/notices");
 });
 
-test("an empty inbox uses the empty copy and the signed-in masthead", async () => {
-  mockNotices({ email: "ada@gmail.com", notices: [] });
+test("an empty inbox shows the empty copy and four lanes", async () => {
+  mockNotices(board());
 
   render(<NoticesPage />);
 
@@ -61,52 +92,48 @@ test("an empty inbox uses the empty copy and the signed-in masthead", async () =
       "No Application Notices yet. AppTrack reads new mail from now on. Notices appear here as companies write to you.",
     ),
   ).toBeInTheDocument();
-  expect(screen.getByText("Signed in as ada@gmail.com")).toBeInTheDocument();
+  expect(screen.getByRole("img", { name: "ada@gmail.com" })).toHaveAttribute("src", PICTURE);
+  expect(screen.queryByText(/Signed in as/)).not.toBeInTheDocument();
+  expect(screen.queryByText("None yet")).not.toBeInTheDocument();
   expect(screen.queryByRole("article")).not.toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "Application Sent 0 notices" })).toBeInTheDocument();
 });
 
-test("ready notices render three tone groups, preserving server order", async () => {
-  const cookie = vi.spyOn(document, "cookie", "get");
-  const fetchSpy = mockNotices({
-    email: "ada@gmail.com",
-    notices: [
-      notice({
-        id: "0192f3a4-5b6c-7d8e-9f01-23456789ab02",
-        company: "Earlier Co",
-        role: "Analyst",
-        status: "Application Sent",
-        sentAt: "2026-11-01T08:15:00Z",
-      }),
-      notice({
-        id: "0192f3a4-5b6c-7d8e-9f01-23456789ab03",
-        company: "Northwind Freight",
-        role: null,
-        status: "Interviewing",
-        sentAt: "2026-11-03T14:22:05Z",
-      }),
-      notice({
-        id: "0192f3a4-5b6c-7d8e-9f01-23456789ab04",
-        company: "Later Co",
-        role: "Writer",
-        status: "Application Sent",
-        sentAt: "2026-11-04T16:40:00Z",
-      }),
-    ],
-  });
+test("ready notices render four lanes and keep server order inside a lane", async () => {
+  const fetchSpy = mockNotices(
+    board({
+      0: [
+        card({
+          id: "0192f3a4-5b6c-7d8e-9f01-23456789ab02",
+          company: "Earlier Co",
+          role: "Analyst",
+          sentAt: "2026-11-01T08:15:00Z",
+        }),
+        card({
+          id: "0192f3a4-5b6c-7d8e-9f01-23456789ab04",
+          company: "Later Co",
+          role: "Writer",
+          sentAt: "2026-11-04T16:40:00Z",
+        }),
+      ],
+      1: [card({ id: "0192f3a4-5b6c-7d8e-9f01-23456789ab03", company: "Northwind Freight", role: null })],
+    }),
+  );
 
   render(<NoticesPage />);
 
-  expect(await screen.findByText("Signed in as ada@gmail.com")).toBeInTheDocument();
-  expect(screen.getAllByRole("heading").map((heading) => heading.textContent)).toEqual([
+  expect(await screen.findByRole("img", { name: "ada@gmail.com" })).toHaveAttribute("src", PICTURE);
+  expect(screen.getAllByRole("heading").map((heading) => heading.textContent?.replace(/\s+/g, " ").trim())).toEqual([
     "Application Notices",
-    "Application Sent",
-    "Interviewing",
-    "Rejected",
+    "Application Sent 2 notices",
+    "Interviewing 1 notice",
+    "Accepted 0 notices",
+    "Rejected 0 notices",
   ]);
 
-  const sent = screen.getByRole("region", { name: "Application Sent" });
+  const sent = screen.getByRole("region", { name: "Application Sent 2 notices" });
   const sentCards = within(sent).getAllByRole("article");
-  expect(sentCards.map((card) => card.querySelector(".notice-company")?.textContent)).toEqual([
+  expect(sentCards.map((item) => item.querySelector(".notice-company")?.textContent)).toEqual([
     "Earlier Co",
     "Later Co",
   ]);
@@ -115,22 +142,67 @@ test("ready notices render three tone groups, preserving server order", async ()
   expect(within(sentCards[0]).getByText("Application Sent")).toBeInTheDocument();
   expect(within(sentCards[0]).getByText("Sent 1 Nov 2026, 08:15 UTC")).toBeInTheDocument();
 
-  const interviewing = screen.getByRole("region", { name: "Interviewing" });
+  const interviewing = screen.getByRole("region", { name: "Interviewing 1 notice" });
   const interviewCard = within(interviewing).getByRole("article");
   expect(interviewCard).toHaveClass("notice-card", "notice-card--interviewing");
-  expect(within(interviewCard).getByText("Northwind Freight")).toBeInTheDocument();
   expect(within(interviewCard).getByText("Role not named")).toBeInTheDocument();
-  expect(within(interviewCard).getByText("Interviewing")).toBeInTheDocument();
-  expect(within(interviewCard).getByText("Sent 3 Nov 2026, 14:22 UTC")).toBeInTheDocument();
 
-  const rejected = screen.getByRole("region", { name: "Rejected" });
-  expect(within(rejected).getByText("None yet")).toBeInTheDocument();
-  expect(within(rejected).queryByRole("article")).not.toBeInTheDocument();
-
-  expect(fetchSpy).toHaveBeenCalledTimes(1);
+  expect(within(screen.getByRole("region", { name: "Accepted 0 notices" })).queryByRole("article")).not.toBeInTheDocument();
+  expect(within(screen.getByRole("region", { name: "Rejected 0 notices" })).queryByRole("article")).not.toBeInTheDocument();
+  expect(screen.queryByText("None yet")).not.toBeInTheDocument();
   expect(fetchSpy).toHaveBeenCalledWith("/api/notices", expect.anything());
-  expect(String(fetchSpy.mock.calls[0][0])).toBe("/api/notices");
-  expect(cookie).not.toHaveBeenCalled();
+});
+
+test("a full lane asks for the next offset when its end is visible", async () => {
+  const notices = Array.from({ length: 12 }, (_, index) =>
+    card({
+      id: `0192f3a4-5b6c-7d8e-9f01-23456789ab${index.toString(16).padStart(2, "0")}`,
+      company: `Company ${index}`,
+    }),
+  );
+  let calls = 0;
+  vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+    const url = String(input);
+    if (url === "/api/session") return Promise.resolve(sessionResponse());
+    calls += 1;
+    if (url.startsWith("/api/notices/lane")) {
+      return Promise.resolve(
+        jsonResponse(200, {
+          email: "ada@gmail.com",
+          status: "Application Sent",
+          limit: 12,
+          notices: [card({ id: "0192f3a4-5b6c-7d8e-9f01-23456789ab99", company: "Older Co" })],
+        }),
+      );
+    }
+    return Promise.resolve(jsonResponse(200, board({ 0: notices })));
+  });
+
+  const observed: IntersectionObserverCallback[] = [];
+  vi.stubGlobal(
+    "IntersectionObserver",
+    class {
+      constructor(callback: IntersectionObserverCallback) {
+        observed.push(callback);
+      }
+      observe() {}
+      disconnect() {}
+      unobserve() {}
+      takeRecords() {
+        return [];
+      }
+    },
+  );
+
+  render(<NoticesPage />);
+  expect(await screen.findByText("Company 0")).toBeInTheDocument();
+
+  await act(async () => {
+    observed[0]?.([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver);
+  });
+
+  expect(await screen.findByText("Older Co")).toBeInTheDocument();
+  expect(calls).toBe(2);
 });
 
 test("unmount aborts the notices request", () => {
@@ -169,19 +241,41 @@ test("the landing page shows the connect failure only for the exact query", asyn
   expect(screen.getByRole("link", { name: /^Connect$/ })).toBeInTheDocument();
 });
 
-function notice(overrides: Record<string, unknown> = {}) {
+function emptyLanes() {
+  return ["Application Sent", "Interviewing", "Accepted", "Rejected"].map((status) => ({
+    status,
+    limit: 12,
+    notices: [] as ReturnType<typeof card>[],
+  }));
+}
+
+function board(filled: Record<number, ReturnType<typeof card>[]> = {}) {
+  const lanes = emptyLanes();
+  for (const [index, notices] of Object.entries(filled)) {
+    lanes[Number(index)].notices = notices;
+  }
+  return { email: "ada@gmail.com", lanes };
+}
+
+function card(overrides: Record<string, unknown> = {}) {
   return {
     id: "0192f3a4-5b6c-7d8e-9f01-23456789abcd",
     company: "Northwind Freight",
-    role: "Data Analyst",
-    status: "Interviewing",
+    role: "Data Analyst" as string | null,
     sentAt: "2026-11-03T14:22:05Z",
     ...overrides,
   };
 }
 
 function mockNotices(body: unknown) {
-  return vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, body));
+  return vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+    if (String(input) === "/api/session") return Promise.resolve(sessionResponse());
+    return Promise.resolve(jsonResponse(200, body));
+  });
+}
+
+function sessionResponse() {
+  return jsonResponse(200, { email: "ada@gmail.com", picture: PICTURE });
 }
 
 function jsonResponse(status: number, body: unknown) {

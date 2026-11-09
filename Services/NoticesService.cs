@@ -3,16 +3,23 @@ using Microsoft.EntityFrameworkCore;
 
 namespace Apptrack.Services;
 
-public sealed record NoticesPage(string Email, IReadOnlyList<NoticeItem> Notices);
+public sealed record NoticeCard(Guid Id, string Company, string? Role, DateTime SentAt);
 
-public sealed record NoticeItem(Guid Id, string Company, string? Role, string Status, DateTime SentAt);
+/// <summary>
+/// One window of one status. Null from <see cref="NoticesService.GetNotices"/> means the person is missing.
+/// </summary>
+public sealed record NoticePage(string Email, IReadOnlyList<NoticeCard> Notices);
 
 public sealed class NoticesService(AppDbContext db)
 {
+    public const int BoardLimit = 12;
+    public const int MaxLimit = 50;
+
     /// <summary>
-    /// The person's address and live notices, newest first. Null when the person is missing or soft-deleted.
+    /// One status window for a live person, newest sent time then id. Null when the person is missing or soft-deleted.
     /// </summary>
-    public async Task<NoticesPage?> LoadAsync(Guid userId, CancellationToken ct)
+    public async Task<NoticePage?> GetNotices(
+        Guid userId, NoticeStatus status, int limit, int offset, CancellationToken ct)
     {
         var email = await db.Users
             .Where(u => u.Id == userId)
@@ -22,15 +29,17 @@ public sealed class NoticesService(AppDbContext db)
             return null;
 
         var rows = await db.ApplicationNotices
-            .Where(n => n.UserId == userId)
+            .Where(n => n.UserId == userId && n.Status == status.Label)
             .OrderByDescending(n => n.SentAt)
             .ThenByDescending(n => n.Id)
-            .Select(n => new { n.Id, n.Company, n.Role, n.Status, n.SentAt })
+            .Select(n => new { n.Id, n.Company, n.Role, n.SentAt })
+            .Skip(offset)
+            .Take(limit)
             .ToListAsync(ct);
 
         var notices = rows
-            .Select(n => new NoticeItem(n.Id, n.Company, n.Role, n.Status, DateTime.SpecifyKind(n.SentAt, DateTimeKind.Utc)))
+            .Select(n => new NoticeCard(n.Id, n.Company, n.Role, DateTime.SpecifyKind(n.SentAt, DateTimeKind.Utc)))
             .ToList();
-        return new NoticesPage(email, notices);
+        return new NoticePage(email, notices);
     }
 }

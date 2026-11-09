@@ -1,3 +1,5 @@
+using System.Text.Json;
+using Apptrack.Services;
 using Apptrack.Services.NoticeExtraction;
 using Xunit;
 
@@ -10,7 +12,8 @@ public sealed class StatusContractTests
     {
         var names = Enum.GetValues<ApplicationStatus>().Select(s => s.DisplayName());
 
-        Assert.Equal(["Application Sent", "Interviewing", "Rejected"], names);
+        Assert.Equal(["Application Sent", "Interviewing", "Accepted", "Rejected"], names);
+        Assert.True(NoticeStatus.MatchesEnum());
     }
 
     [Fact]
@@ -23,6 +26,20 @@ public sealed class StatusContractTests
 
             Assert.Equal(status.DisplayName(), notice.Status);
         }
+    }
+
+    [Fact]
+    public void Notice_status_labels_match_the_shared_contract()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "contracts", "notice-statuses.json")))
+            dir = dir.Parent;
+
+        Assert.NotNull(dir);
+        using var json = JsonDocument.Parse(File.ReadAllText(Path.Combine(dir.FullName, "contracts", "notice-statuses.json")));
+        var labels = json.RootElement.EnumerateArray().Select(item => item.GetProperty("label").GetString()).ToArray();
+
+        Assert.Equal(NoticeStatus.All.Select(status => status.Label), labels);
     }
 
     [Fact]

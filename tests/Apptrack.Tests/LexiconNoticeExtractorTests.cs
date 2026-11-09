@@ -133,7 +133,6 @@ public sealed class LexiconNoticeExtractorTests
     }
 
     [Theory]
-    [InlineData("offer")]
     [InlineData("newsletter")]
     [InlineData("verify your email")]
     [InlineData("job alert")]
@@ -147,6 +146,34 @@ public sealed class LexiconNoticeExtractorTests
             Date: Tue, 03 Nov 2026 14:30:00 +0000
 
             This message is a {phrase} update.
+            """);
+
+        Assert.Null(notice);
+    }
+
+    [Fact]
+    public async Task An_offer_is_accepted()
+    {
+        var notice = await Read("""
+            From: Acme Careers <jobs@acme.com>
+            Subject: Your offer
+            Date: Tue, 03 Nov 2026 14:30:00 +0000
+
+            We are pleased to offer you the role.
+            """);
+
+        AssertNotice(notice, "Acme Careers", ApplicationRole.Unnamed, ApplicationStatus.Accepted, SentAt);
+    }
+
+    [Fact]
+    public async Task An_offer_and_a_rejection_together_are_not_a_notice()
+    {
+        var notice = await Read("""
+            From: Acme Careers <jobs@acme.com>
+            Subject: Offer
+            Date: Tue, 03 Nov 2026 14:30:00 +0000
+
+            We are not moving forward and cannot offer you the role.
             """);
 
         Assert.Null(notice);
