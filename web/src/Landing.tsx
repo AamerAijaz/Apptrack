@@ -100,7 +100,7 @@ export function Landing() {
 
 function SignedInMark({ email, picture }: { email: string; picture: string | null }) {
   const [broken, setBroken] = useState(false);
-  if (!picture || broken) return <p className="signed-in">{email}</p>;
+  if (!picture || broken) return <LetterMark email={email} />;
 
   return (
     <a className="profile" href="/notices">
@@ -114,6 +114,18 @@ function SignedInMark({ email, picture }: { email: string; picture: string | nul
       />
     </a>
   );
+}
+
+function LetterMark({ email }: { email: string }) {
+  return (
+    <a className="profile profile--letter" href="/notices" aria-label={email}>
+      <span aria-hidden="true">{profileLetter(email)}</span>
+    </a>
+  );
+}
+
+function profileLetter(email: string): string {
+  return email.trim().charAt(0).toLocaleUpperCase();
 }
 
 function ApplicationSpecimen() {

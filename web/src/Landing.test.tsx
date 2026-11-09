@@ -55,14 +55,17 @@ test("a failed session read leaves Connect Gmail", async () => {
   expect(await screen.findAllByRole("link", { name: "Connect Gmail" })).toHaveLength(2);
 });
 
-test("a session without a picture shows the email and hides Connect Gmail", async () => {
+test("a session without a picture shows the email's first letter and hides Connect Gmail", async () => {
   vi.spyOn(globalThis, "fetch").mockResolvedValue(
-    jsonResponse(200, { email: "ada@gmail.com", picture: null }),
+    jsonResponse(200, { email: "aamerasim45@gmail.com", picture: null }),
   );
 
   render(<Landing />);
 
-  expect(await screen.findByText("ada@gmail.com")).toBeInTheDocument();
+  const mark = await screen.findByRole("link", { name: "aamerasim45@gmail.com" });
+  expect(mark).toHaveAttribute("href", "/notices");
+  expect(mark).toHaveTextContent("A");
+  expect(screen.queryByText("aamerasim45@gmail.com")).not.toBeInTheDocument();
   expect(screen.queryByRole("img")).not.toBeInTheDocument();
   expect(screen.queryByRole("link", { name: "Connect Gmail" })).not.toBeInTheDocument();
   expect(screen.queryByText("Read-only Gmail access. AppTrack never sends mail.")).not.toBeInTheDocument();
@@ -75,11 +78,11 @@ test("an http picture is not used as the image", async () => {
 
   render(<Landing />);
 
-  expect(await screen.findByText("ada@gmail.com")).toBeInTheDocument();
+  expect(await screen.findByRole("link", { name: "ada@gmail.com" })).toHaveTextContent("A");
   expect(screen.queryByRole("img")).not.toBeInTheDocument();
 });
 
-test("a picture that fails to load falls back to the email", async () => {
+test("a picture that fails to load falls back to the email's first letter", async () => {
   vi.spyOn(globalThis, "fetch").mockResolvedValue(
     jsonResponse(200, { email: "ada@gmail.com", picture: PICTURE }),
   );
@@ -89,7 +92,7 @@ test("a picture that fails to load falls back to the email", async () => {
   const photo = await screen.findByRole("img", { name: "ada@gmail.com" });
   fireEvent.error(photo);
 
-  expect(screen.getByText("ada@gmail.com")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "ada@gmail.com" })).toHaveTextContent("A");
   expect(screen.queryByRole("img")).not.toBeInTheDocument();
 });
 
