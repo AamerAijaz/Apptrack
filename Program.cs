@@ -185,9 +185,6 @@ app.MapPost("/api/applications/gmail/webhook", async (PubSubPush push, GmailSync
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
-} else
-{
-    app.UseHttpsRedirection();
 }
 
 app.Run();
