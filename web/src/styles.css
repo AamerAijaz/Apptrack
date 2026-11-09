@@ -101,6 +101,33 @@ a:focus-visible {
   color: var(--ink);
 }
 
+.profile {
+  display: inline-flex;
+  line-height: 0;
+  border-radius: 999px;
+}
+
+.profile img {
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  object-fit: cover;
+  background: var(--rule);
+}
+
+.profile--letter {
+  width: 40px;
+  height: 40px;
+  align-items: center;
+  justify-content: center;
+  background: var(--spruce);
+  color: var(--spruce-ink);
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1;
+  text-decoration: none;
+}
+
 @media (prefers-reduced-motion: no-preference) {
   .connect {
     transition: background-color 120ms ease, border-color 120ms ease;

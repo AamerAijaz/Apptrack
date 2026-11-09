@@ -146,6 +146,10 @@ namespace apptrack.Migrations
                         .HasMaxLength(320)
                         .HasColumnType("character varying(320)");
 
+                    b.Property<string>("PictureUrl")
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
                     b.Property<string>("Provider")
                         .IsRequired()
                         .HasMaxLength(50)

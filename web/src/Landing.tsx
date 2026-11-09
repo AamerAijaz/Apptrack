@@ -1,13 +1,50 @@
+import { useEffect, useState } from "react";
 import { ConnectGmail } from "./auth/ConnectGmail";
+import { isAbortError, loadSessionProfile, type SessionProfile } from "./auth/loadSessionProfile";
+
+type LandingSession = { kind: "pending" } | SessionProfile;
+
+export function useLandingSession(): LandingSession {
+  const [state, setState] = useState<LandingSession>({ kind: "pending" });
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let cancelled = false;
+
+    loadSessionProfile(controller.signal).then(
+      (result) => {
+        if (!cancelled) setState(result);
+      },
+      (error: unknown) => {
+        if (cancelled || isAbortError(error)) return;
+        setState({ kind: "signed-out" });
+      },
+    );
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, []);
+
+  return state;
+}
 
 export function Landing() {
+  const session = useLandingSession();
+  const signedIn = session.kind === "signed-in";
+
   return (
     <>
       <header className="masthead">
         <a className="wordmark" href="/">
           AppTrack
         </a>
-        <ConnectGmail emphasis="quiet" />
+        {signedIn ? (
+          <SignedInMark email={session.email} picture={session.picture} />
+        ) : (
+          <ConnectGmail emphasis="quiet" />
+        )}
       </header>
       <main>
         <section className="hero" aria-labelledby="hero-title">
@@ -18,15 +55,19 @@ export function Landing() {
               Application for each one, with the Company, the Role, and where it
               stands. You correct what the mail got wrong.
             </p>
-            {window.location.search === "?connect=failed" ? (
+            {window.location.search === "?connect=failed" && !signedIn ? (
               <p className="connect-error" role="alert">
                 Gmail couldn't be connected. Try again.
               </p>
             ) : null}
-            <ConnectGmail />
-            <p className="fineprint">
-              Read-only Gmail access. AppTrack never sends mail.
-            </p>
+            {signedIn ? null : (
+              <>
+                <ConnectGmail />
+                <p className="fineprint">
+                  Read-only Gmail access. AppTrack never sends mail.
+                </p>
+              </>
+            )}
           </div>
           <ApplicationSpecimen />
         </section>
@@ -55,6 +96,36 @@ export function Landing() {
       </footer>
     </>
   );
+}
+
+function SignedInMark({ email, picture }: { email: string; picture: string | null }) {
+  const [broken, setBroken] = useState(false);
+  if (!picture || broken) return <LetterMark email={email} />;
+
+  return (
+    <a className="profile" href="/notices">
+      <img
+        alt={email}
+        src={picture}
+        width={40}
+        height={40}
+        referrerPolicy="no-referrer"
+        onError={() => setBroken(true)}
+      />
+    </a>
+  );
+}
+
+function LetterMark({ email }: { email: string }) {
+  return (
+    <a className="profile profile--letter" href="/notices" aria-label={email}>
+      <span aria-hidden="true">{profileLetter(email)}</span>
+    </a>
+  );
+}
+
+function profileLetter(email: string): string {
+  return email.trim().charAt(0).toLocaleUpperCase();
 }
 
 function ApplicationSpecimen() {

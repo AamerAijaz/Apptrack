@@ -147,11 +147,12 @@ test("unmount aborts the notices request", () => {
   expect(signal?.aborted).toBe(true);
 });
 
-test("the landing page shows the connect failure only for the exact query", () => {
+test("the landing page shows the connect failure only for the exact query", async () => {
   window.history.replaceState(null, "", "/?connect=failed");
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 401 }));
   const { unmount } = render(<Landing />);
 
-  expect(screen.getByText("Gmail couldn't be connected. Try again.")).toBeInTheDocument();
+  expect(await screen.findByText("Gmail couldn't be connected. Try again.")).toBeInTheDocument();
   const hero = screen.getByRole("region", { name: "Every Job Application, straight from your inbox." });
   const connects = within(hero).getAllByRole("link", { name: "Connect Gmail" });
   expect(connects).toHaveLength(1);
@@ -163,6 +164,7 @@ test("the landing page shows the connect failure only for the exact query", () =
   window.history.replaceState(null, "", "/?connect=failed&next=1");
   render(<Landing />);
   expect(screen.queryByText("Gmail couldn't be connected. Try again.")).not.toBeInTheDocument();
+  expect(await screen.findAllByRole("link", { name: "Connect Gmail" })).toHaveLength(2);
 });
 
 function notice(overrides: Record<string, unknown> = {}) {

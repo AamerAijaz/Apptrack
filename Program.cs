@@ -34,6 +34,7 @@ var scopes = new[]
 {
     GmailService.ScopeConstants.GmailReadonly,
     "https://www.googleapis.com/auth/userinfo.email",
+    GoogleProfileImage.Scope,
 };
 
 builder.Services.AddSingleton(sp => new ApptrackAuthorizationCodeFlow(new GoogleAuthorizationCodeFlow.Initializer
@@ -54,7 +55,9 @@ builder.Services.AddHostedService<GmailWatchRefreshService>();
 builder.Services.AddDataProtection();
 builder.Services.AddSingleton(WebPages.FromConfiguration(builder.Configuration));
 builder.Services.AddSingleton<SessionCookie>();
+builder.Services.AddHttpClient();
 builder.Services.AddScoped<NoticesService>();
+builder.Services.AddScoped<SessionProfileService>();
 
 var app = builder.Build();
 var flow = app.Services.GetRequiredService<ApptrackAuthorizationCodeFlow>();
@@ -77,7 +80,7 @@ app.MapGet("/api/auth", (HttpContext ctx) =>
     return Results.Redirect(url.AbsoluteUri);
 });
 
-app.MapGet("/api/auth/callback", async (string? code, string? state, string? error, HttpContext ctx, AppDbContext db, GmailSyncService sync, SessionCookie session, WebPages pages) =>
+app.MapGet("/api/auth/callback", async (string? code, string? state, string? error, HttpContext ctx, AppDbContext db, GmailSyncService sync, SessionCookie session, WebPages pages, IHttpClientFactory httpFactory) =>
 {
     try
     {
@@ -111,6 +114,7 @@ app.MapGet("/api/auth/callback", async (string? code, string? state, string? err
         if (token.ExpiresInSeconds is not long expiresInSeconds)
             throw new InvalidOperationException("Token expiry is required.");
 
+        var picture = await GoogleProfileImage.TryFetchAsync(httpFactory.CreateClient(), token.AccessToken);
         var issuedUtc = GoogleTokenDataStore.AsUtc(token.IssuedUtc);
         var user = await db.Users.FirstOrDefaultAsync(u => u.Email == emailAddress && u.Provider == provider);
 
@@ -153,6 +157,7 @@ app.MapGet("/api/auth/callback", async (string? code, string? state, string? err
                 }
             }
 
+            user.RememberPicture(picture);
             await db.SaveChangesAsync();
             await tx.CommitAsync();
         }
@@ -169,6 +174,7 @@ app.MapGet("/api/auth/callback", async (string? code, string? state, string? err
 });
 
 app.MapNotices();
+app.MapSessionProfile();
 
 app.MapPost("/api/applications/gmail/webhook", async (PubSubPush push, GmailSyncService sync) =>
 {
