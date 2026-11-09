@@ -101,6 +101,38 @@ a:focus-visible {
   color: var(--ink);
 }
 
+.connect--mark {
+  position: relative;
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0;
+  border-radius: 999px;
+}
+
+.connect--mark::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 2;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--ink);
+  color: var(--page);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.connect--mark:hover::after,
+.connect--mark:focus-visible::after {
+  opacity: 1;
+}
+
 .profile {
   display: inline-flex;
   line-height: 0;
@@ -108,24 +140,30 @@ a:focus-visible {
 }
 
 .profile img {
-  width: 40px;
-  height: 40px;
+  width: 30px;
+  height: 30px;
   border-radius: 999px;
   object-fit: cover;
   background: var(--rule);
 }
 
 .profile--letter {
-  width: 40px;
-  height: 40px;
+  width: 30px;
+  height: 30px;
   align-items: center;
   justify-content: center;
   background: var(--spruce);
   color: var(--spruce-ink);
-  font-size: 16px;
+  font-size: 13px;
   font-weight: 500;
   line-height: 1;
   text-decoration: none;
+}
+
+.profile--pending {
+  width: 30px;
+  height: 30px;
+  background: var(--rule);
 }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -146,7 +184,7 @@ a:focus-visible {
   display: grid;
   grid-template-columns: minmax(0, 1.4fr) minmax(260px, 0.8fr);
   gap: 48px;
-  align-items: end;
+  align-items: start;
   padding-block: 48px 64px;
 }
 

@@ -1,22 +1,32 @@
 import { useEffect, useState } from "react";
 import { ConnectGmail } from "./auth/ConnectGmail";
-import { isAbortError, loadSessionProfile, type SessionProfile } from "./auth/loadSessionProfile";
+import {
+  forgetProfile,
+  isAbortError,
+  loadLandingSession,
+  readRememberedProfile,
+  type SessionProfile,
+} from "./auth/loadSessionProfile";
 
 type LandingSession = { kind: "pending" } | SessionProfile;
 
 export function useLandingSession(): LandingSession {
-  const [state, setState] = useState<LandingSession>({ kind: "pending" });
+  const [state, setState] = useState<LandingSession>(() => {
+    const remembered = readRememberedProfile();
+    return remembered === null ? { kind: "pending" } : { kind: "signed-in", ...remembered };
+  });
 
   useEffect(() => {
     const controller = new AbortController();
     let cancelled = false;
 
-    loadSessionProfile(controller.signal).then(
+    loadLandingSession(controller.signal).then(
       (result) => {
         if (!cancelled) setState(result);
       },
       (error: unknown) => {
         if (cancelled || isAbortError(error)) return;
+        forgetProfile();
         setState({ kind: "signed-out" });
       },
     );
@@ -33,6 +43,7 @@ export function useLandingSession(): LandingSession {
 export function Landing() {
   const session = useLandingSession();
   const signedIn = session.kind === "signed-in";
+  const signedOut = session.kind === "signed-out";
 
   return (
     <>
@@ -42,8 +53,10 @@ export function Landing() {
         </a>
         {signedIn ? (
           <SignedInMark email={session.email} picture={session.picture} />
-        ) : (
+        ) : signedOut ? (
           <ConnectGmail emphasis="quiet" />
+        ) : (
+          <span className="profile profile--pending" aria-hidden="true" />
         )}
       </header>
       <main>
@@ -55,19 +68,19 @@ export function Landing() {
               Application for each one, with the Company, the Role, and where it
               stands. You correct what the mail got wrong.
             </p>
-            {window.location.search === "?connect=failed" && !signedIn ? (
+            {window.location.search === "?connect=failed" && signedOut ? (
               <p className="connect-error" role="alert">
                 Gmail couldn't be connected. Try again.
               </p>
             ) : null}
-            {signedIn ? null : (
+            {signedOut ? (
               <>
                 <ConnectGmail />
                 <p className="fineprint">
                   Read-only Gmail access. AppTrack never sends mail.
                 </p>
               </>
-            )}
+            ) : null}
           </div>
           <ApplicationSpecimen />
         </section>
@@ -107,8 +120,8 @@ function SignedInMark({ email, picture }: { email: string; picture: string | nul
       <img
         alt={email}
         src={picture}
-        width={40}
-        height={40}
+        width={30}
+        height={30}
         referrerPolicy="no-referrer"
         onError={() => setBroken(true)}
       />

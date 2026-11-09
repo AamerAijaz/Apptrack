@@ -1,11 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
-import { defineConfig } from "vitest/config";
-
-// APPTRACK_API_ORIGIN is read here only. It is not VITE_-prefixed, so Vite
-// does not inline it into the page bundle.
-const apiOrigin = process.env.APPTRACK_API_ORIGIN ?? "http://localhost:5028";
+import { defineConfig, loadEnv } from "vite";
 
 // One-time setup so the dev server is HTTPS and the Secure oauth_state cookie
 // is stored for localhost (cookies are not scoped by port, so the callback on
@@ -30,25 +26,32 @@ function devHttps() {
 const isVitest = process.env.VITEST === "true";
 const isBuild = process.argv.includes("build");
 
-export default defineConfig({
-  plugins: [react()],
-  server:
-    isVitest || isBuild
-      ? undefined
-      : {
-          port: 5173,
-          strictPort: true,
-          https: devHttps(),
-          proxy: {
-            "/api": {
-              target: apiOrigin,
-              secure: false,
+export default defineConfig(({ mode }) => {
+  // APPTRACK_API_ORIGIN is read here only. It is not VITE_-prefixed, so Vite
+  // does not inline it into the page bundle.
+  const env = loadEnv(mode, process.cwd(), '');
+  const apiOrigin = env.API_ORIGIN ?? "http://localhost:5028";
+
+  return {
+    plugins: [react()],
+    server:
+      isVitest || isBuild
+        ? undefined
+        : {
+            port: 5173,
+            strictPort: true,
+            https: devHttps(),
+            proxy: {
+              "/api": {
+                target: apiOrigin,
+                secure: false,
+              },
             },
           },
-        },
-  test: {
-    environment: "jsdom",
-    globals: true,
-    setupFiles: "./src/test-setup.ts",
-  },
+    test: {
+      environment: "jsdom",
+      globals: true,
+      setupFiles: "./src/test-setup.ts",
+    },
+  }
 });

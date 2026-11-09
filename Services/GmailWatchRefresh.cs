@@ -31,6 +31,8 @@ public sealed class GmailWatchRefresh(
         {
             try
             {
+                logger.LogInformation("Refreshing watch for user-id, {userId}", userId);
+
                 await using var scope = scopes.CreateAsyncScope();
                 var sync = scope.ServiceProvider.GetRequiredService<GmailSyncService>();
                 await sync.StartWatchAsync(userId, ct);

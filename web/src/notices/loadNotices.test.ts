@@ -1,7 +1,9 @@
 import { loadNotices } from "./loadNotices";
+import { REMEMBERED_PROFILE_KEY } from "../auth/loadSessionProfile";
 
 afterEach(() => {
   vi.restoreAllMocks();
+  localStorage.clear();
 });
 
 test("the only request is GET /api/notices as JSON", async () => {
@@ -22,9 +24,14 @@ test("the only request is GET /api/notices as JSON", async () => {
 });
 
 test("401 is signed out, even when the body is not JSON", async () => {
+  localStorage.setItem(
+    REMEMBERED_PROFILE_KEY,
+    JSON.stringify({ email: "ada@gmail.com", picture: null, savedAt: Date.now() }),
+  );
   vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("nope", { status: 401 }));
 
   await expect(loadNotices()).resolves.toEqual({ kind: "signed-out" });
+  expect(localStorage.getItem(REMEMBERED_PROFILE_KEY)).toBeNull();
 });
 
 test("200 with an empty notices array is an empty inbox", async () => {
