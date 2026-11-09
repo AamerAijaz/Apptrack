@@ -91,7 +91,12 @@ export function readRememberedProfile(): RememberedProfile | null {
 
 export function rememberProfile(profile: { email: string; picture: string | null }, savedAt = Date.now()): void {
   const remembered: RememberedProfile = { email: profile.email, picture: profile.picture, savedAt };
-  localStorage.setItem(REMEMBERED_PROFILE_KEY, JSON.stringify(remembered));
+  try {
+    localStorage.setItem(REMEMBERED_PROFILE_KEY, JSON.stringify(remembered));
+  } catch (err) {
+    // Error setting item to localStorage.
+    console.error("ERROR: failed to set item to localStorage", err);
+  }
 }
 
 export function rememberedProfileIsFresh(profile: RememberedProfile, now = Date.now()): boolean {
@@ -108,5 +113,9 @@ function parseRemembered(value: unknown): RememberedProfile | null {
 }
 
 export function forgetProfile(): void {
-  localStorage.removeItem(REMEMBERED_PROFILE_KEY);
+  try {
+    localStorage.removeItem(REMEMBERED_PROFILE_KEY);
+  } catch (err) {
+    console.error("ERROR: failed to remove item from localStorage", err);
+  }
 }
