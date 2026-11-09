@@ -49,6 +49,8 @@ builder.Services.AddSingleton<IApplicationNoticeExtractor>(sp =>
         logger: sp.GetRequiredService<ILogger<AiNoticeExtractor>>()));
 builder.Services.AddScoped<GmailSyncService>();
 builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton<GmailWatchRefresh>();
+builder.Services.AddHostedService<GmailWatchRefreshService>();
 builder.Services.AddDataProtection();
 builder.Services.AddSingleton(WebPages.FromConfiguration(builder.Configuration));
 builder.Services.AddSingleton<SessionCookie>();
