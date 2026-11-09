@@ -4,6 +4,7 @@ import { NoticesPage } from "./NoticesPage";
 
 afterEach(() => {
   vi.restoreAllMocks();
+  localStorage.clear();
   window.history.replaceState(null, "", "/");
 });
 
@@ -37,7 +38,7 @@ test("401 shows the signed-out message and Connect Gmail", async () => {
   render(<NoticesPage />);
 
   expect(await screen.findByText("You're not signed in.")).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: "Connect Gmail" })).toHaveAttribute("href", "/api/auth");
+  expect(screen.getByRole("link", { name: "Connect" })).toHaveAttribute("href", "/api/auth");
   expect(screen.queryByText(/Signed in as/)).not.toBeInTheDocument();
 });
 
@@ -154,17 +155,18 @@ test("the landing page shows the connect failure only for the exact query", asyn
 
   expect(await screen.findByText("Gmail couldn't be connected. Try again.")).toBeInTheDocument();
   const hero = screen.getByRole("region", { name: "Every Job Application, straight from your inbox." });
-  const connects = within(hero).getAllByRole("link", { name: "Connect Gmail" });
+  const connects = within(hero).getAllByRole("link", { name: /^Connect$/ });
   expect(connects).toHaveLength(1);
   expect(
     hero.innerHTML.indexOf("Gmail couldn't be connected. Try again."),
-  ).toBeLessThan(hero.innerHTML.indexOf("Connect Gmail"));
+  ).toBeLessThan(hero.innerHTML.indexOf("Connect"));
   unmount();
 
   window.history.replaceState(null, "", "/?connect=failed&next=1");
   render(<Landing />);
   expect(screen.queryByText("Gmail couldn't be connected. Try again.")).not.toBeInTheDocument();
-  expect(await screen.findAllByRole("link", { name: "Connect Gmail" })).toHaveLength(2);
+  expect(await screen.findByRole("link", { name: "Connect to Gmail" })).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: /^Connect$/ })).toBeInTheDocument();
 });
 
 function notice(overrides: Record<string, unknown> = {}) {

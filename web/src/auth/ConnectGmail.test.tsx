@@ -1,11 +1,11 @@
 import { render, screen } from "@testing-library/react";
 import { ConnectGmail } from "./ConnectGmail";
 
-test("Connect Gmail is a link to the AppTrack sign-in start", () => {
+test("Connect is a link to the AppTrack sign-in start", () => {
   const fetchSpy = vi.spyOn(globalThis, "fetch");
   render(<ConnectGmail />);
 
-  const link = screen.getByRole("link", { name: "Connect Gmail" });
+  const link = screen.getByRole("link", { name: "Connect" });
   expect(link).toHaveAttribute("href", "/api/auth");
   expect(link.tagName).toBe("A");
 
@@ -15,11 +15,12 @@ test("Connect Gmail is a link to the AppTrack sign-in start", () => {
   fetchSpy.mockRestore();
 });
 
-test("a quiet Connect Gmail still links to the same sign-in start", () => {
+test("a quiet Connect is a round control named Connect to Gmail", () => {
   render(<ConnectGmail emphasis="quiet" />);
 
-  expect(screen.getByRole("link", { name: "Connect Gmail" })).toHaveAttribute(
-    "href",
-    "/api/auth",
-  );
+  const link = screen.getByRole("link", { name: "Connect to Gmail" });
+  expect(link).toHaveAttribute("href", "/api/auth");
+  expect(link).toHaveAttribute("data-tooltip", "Connect to Gmail");
+  expect(link).toHaveClass("connect--mark");
+  expect(link).not.toHaveTextContent("Connect");
 });

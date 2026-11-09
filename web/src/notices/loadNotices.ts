@@ -1,3 +1,4 @@
+import { forgetProfile } from "../auth/loadSessionProfile";
 import { groupByStatus, parseStatus, type NoticeStatus, type StatusGroup } from "./statuses";
 
 export const NOTICES_PATH = "/notices";
@@ -45,7 +46,10 @@ export async function loadNotices(signal?: AbortSignal): Promise<NoticesResult> 
     return { kind: "failed" };
   }
 
-  if (response.status === 401) return { kind: "signed-out" };
+  if (response.status === 401) {
+    forgetProfile();
+    return { kind: "signed-out" };
+  }
   if (response.status !== 200) return { kind: "failed" };
 
   let body: unknown;
