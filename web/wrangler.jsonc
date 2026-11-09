@@ -2,6 +2,11 @@
   "name": "apptrack",
   "main": "./worker/index.js",
   "compatibility_date": "2026-11-09",
+  "secrets": {
+    "required": ["API_ORIGIN"]
+  },
+  "vars": {},
+  "previews": {},
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
