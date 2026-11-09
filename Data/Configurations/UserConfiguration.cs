@@ -16,6 +16,7 @@ public sealed class UserConfiguration : IEntityTypeConfiguration<User>
 
         builder.Property(u => u.Email).HasMaxLength(320).IsRequired();
         builder.Property(u => u.Provider).HasMaxLength(50).IsRequired();
+        builder.Property(u => u.PictureUrl).HasMaxLength(ProfilePicture.MaxLength);
 
         builder.Property(u => u.CreatedAt).IsRequired();
         builder.Property(u => u.CreatedAt).Metadata.SetAfterSaveBehavior(PropertySaveBehavior.Throw);
