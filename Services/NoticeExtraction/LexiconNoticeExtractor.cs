@@ -27,6 +27,15 @@ public sealed partial class LexiconNoticeExtractor : IApplicationNoticeExtractor
         "assessment",
     ];
 
+    private static readonly string[] AcceptedPhrases =
+    [
+        "pleased to offer",
+        "offer of employment",
+        "job offer",
+        "offer letter",
+        "your offer",
+    ];
+
     private static readonly string[] RejectedPhrases =
     [
         "other candidates",
@@ -36,7 +45,6 @@ public sealed partial class LexiconNoticeExtractor : IApplicationNoticeExtractor
 
     private static readonly string[] AbstainPhrases =
     [
-        "offer",
         "newsletter",
         "verify your email",
         "job alert",
@@ -48,7 +56,7 @@ public sealed partial class LexiconNoticeExtractor : IApplicationNoticeExtractor
     private static readonly string[] IgnoredTitles = ["the", "a", "an", "open"];
 
     private static readonly string[] ListedPhrases =
-        Acknowledgements.Concat(InterviewingPhrases).Concat(RejectedPhrases).Concat(AbstainPhrases).ToArray();
+        Acknowledgements.Concat(InterviewingPhrases).Concat(AcceptedPhrases).Concat(RejectedPhrases).Concat(AbstainPhrases).ToArray();
 
     public Task<ApplicationNotice?> ExtractAsync(string messageId, string content, CancellationToken ct)
     {
@@ -83,10 +91,11 @@ public sealed partial class LexiconNoticeExtractor : IApplicationNoticeExtractor
     private static bool TryStatus(string subject, string body, out ApplicationStatus status)
     {
         var interviewing = InterviewingPhrases.Any(phrase => HasPhrase(subject, phrase) || HasPhrase(body, phrase));
+        var accepted = AcceptedPhrases.Any(phrase => HasPhrase(subject, phrase) || HasPhrase(body, phrase));
         var rejected = RejectedPhrases.Any(phrase => HasPhrase(subject, phrase) || HasPhrase(body, phrase));
         var acknowledged = Acknowledgements.Any(phrase => HasPhrase(subject, phrase) || HasPhrase(body, phrase));
 
-        if (interviewing && rejected)
+        if ((interviewing && rejected) || (accepted && rejected))
         {
             status = default;
             return false;
@@ -94,6 +103,8 @@ public sealed partial class LexiconNoticeExtractor : IApplicationNoticeExtractor
 
         if (rejected)
             status = ApplicationStatus.Rejected;
+        else if (accepted)
+            status = ApplicationStatus.Accepted;
         else if (interviewing)
             status = ApplicationStatus.Interviewing;
         else if (acknowledged)

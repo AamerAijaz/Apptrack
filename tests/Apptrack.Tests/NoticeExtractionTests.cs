@@ -159,7 +159,7 @@ public sealed class LlmNoticeExtractorTests
     }
 
     [Fact]
-    public async Task An_offer_status_is_not_a_notice()
+    public async Task An_offer_is_an_accepted_notice()
     {
         var content = """
             From: Acme <jobs@acme.com>
@@ -168,12 +168,15 @@ public sealed class LlmNoticeExtractorTests
 
             We are pleased to offer you the role at Acme.
             """;
-        var completion = """{"company":"Acme","role":"Engineer","status":"Offer"}""";
+        var completion = """{"company":"Acme","role":"Engineer","status":"Accepted"}""";
         var extractor = Extractor(_ => JsonResponse(completion));
 
         var notice = await extractor.ExtractAsync("msg-1", content, CancellationToken.None);
 
-        Assert.Null(notice);
+        Assert.NotNull(notice);
+        Assert.Equal(ApplicationStatus.Accepted, notice.Status);
+        Assert.Equal("Acme", notice.Company);
+        Assert.Equal(ApplicationRole.Named("Engineer"), notice.Role);
     }
 
     [Fact]

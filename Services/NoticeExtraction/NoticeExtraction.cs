@@ -7,6 +7,7 @@ public enum ApplicationStatus
 {
     ApplicationSent,
     Interviewing,
+    Accepted,
     Rejected,
 }
 
@@ -16,6 +17,7 @@ public static class ApplicationStatusText
     {
         ApplicationStatus.ApplicationSent => "Application Sent",
         ApplicationStatus.Interviewing => "Interviewing",
+        ApplicationStatus.Accepted => "Accepted",
         ApplicationStatus.Rejected => "Rejected",
         _ => throw new ArgumentOutOfRangeException(nameof(status)),
     };

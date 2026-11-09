@@ -1,4 +1,5 @@
 using Apptrack.Entities;
+using Apptrack.Services;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
@@ -12,7 +13,7 @@ public sealed class ApplicationNoticeConfiguration : IEntityTypeConfiguration<Ap
         builder.ToTable("application_notices", table =>
             table.HasCheckConstraint(
                 "CK_application_notices_Status",
-                "\"Status\" IN ('Application Sent', 'Interviewing', 'Rejected')"));
+                NoticeStatus.CheckConstraintSql));
 
         builder.HasKey(n => n.Id);
         builder.Property(n => n.Id).ValueGeneratedNever();
@@ -33,6 +34,10 @@ public sealed class ApplicationNoticeConfiguration : IEntityTypeConfiguration<Ap
             .OnDelete(DeleteBehavior.Restrict);
 
         builder.HasIndex(n => new { n.UserId, n.MessageId }).IsUnique();
+        builder.HasIndex(n => new { n.UserId, n.Status, n.SentAt, n.Id })
+            .IsDescending(false, false, true, true)
+            .HasFilter("\"DeletedAt\" IS NULL")
+            .HasDatabaseName("IX_application_notices_lane");
         builder.HasQueryFilter(n => n.DeletedAt == null);
     }
 }

@@ -1,0 +1,6 @@
+[
+  { "label": "Application Sent", "tone": "sent" },
+  { "label": "Interviewing", "tone": "interviewing" },
+  { "label": "Accepted", "tone": "accepted" },
+  { "label": "Rejected", "tone": "rejected" }
+]

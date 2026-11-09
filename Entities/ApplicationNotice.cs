@@ -1,3 +1,5 @@
+using Apptrack.Services;
+
 namespace Apptrack.Entities;
 
 public sealed class ApplicationNotice
@@ -22,7 +24,7 @@ public sealed class ApplicationNotice
             throw new ArgumentException("A notice requires a Gmail message id.", nameof(messageId));
         if (string.IsNullOrWhiteSpace(company))
             throw new ArgumentException("A notice requires a company.", nameof(company));
-        if (status is not ("Application Sent" or "Interviewing" or "Rejected"))
+        if (NoticeStatus.FromLabel(status) is null)
             throw new ArgumentException("A notice requires a known status.", nameof(status));
         if (sentAtUtc == default)
             throw new ArgumentException("A notice requires the time the mail was sent.", nameof(sentAtUtc));

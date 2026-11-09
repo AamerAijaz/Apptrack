@@ -30,6 +30,7 @@ test("holds the masthead until the session is known", async () => {
   const photo = await screen.findByRole("img", { name: "ada@gmail.com" });
   expect(photo).toHaveAttribute("src", PICTURE);
   expect(photo.closest("a")).toHaveAttribute("href", "/notices");
+  expect(screen.getByRole("link", { name: "Notices" })).toHaveAttribute("href", "/notices");
   expect(screen.queryByRole("link", { name: /connect/i })).not.toBeInTheDocument();
   expect(screen.queryByText("Read-only Gmail access. AppTrack never sends mail.")).not.toBeInTheDocument();
   const stored = JSON.parse(localStorage.getItem(REMEMBERED_PROFILE_KEY) ?? "null");
@@ -47,6 +48,7 @@ test("a fresh remembered picture does not ask the server", async () => {
   render(<Landing />);
 
   expect(screen.getByRole("img", { name: "ada@gmail.com" })).toHaveAttribute("src", PICTURE);
+  expect(screen.getByRole("link", { name: "Notices" })).toHaveAttribute("href", "/notices");
   expect(screen.queryByRole("link", { name: /connect/i })).not.toBeInTheDocument();
   await act(async () => {
     await Promise.resolve();
@@ -110,6 +112,7 @@ test("a session without a picture shows the email's first letter and hides Conne
   const mark = await screen.findByRole("link", { name: "aamerasim45@gmail.com" });
   expect(mark).toHaveAttribute("href", "/notices");
   expect(mark).toHaveTextContent("A");
+  expect(screen.getByRole("link", { name: "Notices" })).toHaveAttribute("href", "/notices");
   expect(screen.queryByText("aamerasim45@gmail.com")).not.toBeInTheDocument();
   expect(screen.queryByRole("img")).not.toBeInTheDocument();
   expect(screen.queryByRole("link", { name: /connect/i })).not.toBeInTheDocument();

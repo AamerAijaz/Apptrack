@@ -1,64 +1,14 @@
-import { useEffect, useState } from "react";
 import { ConnectGmail } from "./auth/ConnectGmail";
-import {
-  forgetProfile,
-  isAbortError,
-  loadLandingSession,
-  readRememberedProfile,
-  type SessionProfile,
-} from "./auth/loadSessionProfile";
-
-type LandingSession = { kind: "pending" } | SessionProfile;
-
-export function useLandingSession(): LandingSession {
-  const [state, setState] = useState<LandingSession>(() => {
-    const remembered = readRememberedProfile();
-    return remembered === null ? { kind: "pending" } : { kind: "signed-in", ...remembered };
-  });
-
-  useEffect(() => {
-    const controller = new AbortController();
-    let cancelled = false;
-
-    loadLandingSession(controller.signal).then(
-      (result) => {
-        if (!cancelled) setState(result);
-      },
-      (error: unknown) => {
-        if (cancelled || isAbortError(error)) return;
-        forgetProfile();
-        setState({ kind: "signed-out" });
-      },
-    );
-
-    return () => {
-      cancelled = true;
-      controller.abort();
-    };
-  }, []);
-
-  return state;
-}
+import { Masthead, useMastheadSession } from "./Masthead";
 
 export function Landing() {
-  const session = useLandingSession();
+  const session = useMastheadSession();
   const signedIn = session.kind === "signed-in";
   const signedOut = session.kind === "signed-out";
 
   return (
     <>
-      <header className="masthead">
-        <a className="wordmark" href="/">
-          AppTrack
-        </a>
-        {signedIn ? (
-          <SignedInMark email={session.email} picture={session.picture} />
-        ) : signedOut ? (
-          <ConnectGmail emphasis="quiet" />
-        ) : (
-          <span className="profile profile--pending" aria-hidden="true" />
-        )}
-      </header>
+      <Masthead session={session} />
       <main>
         <section className="hero" aria-labelledby="hero-title">
           <div className="hero-copy">
@@ -80,6 +30,10 @@ export function Landing() {
                   Read-only Gmail access. AppTrack never sends mail.
                 </p>
               </>
+            ) : signedIn ? (
+              <a className="connect connect--primary" href="/notices">
+                Notices
+              </a>
             ) : null}
           </div>
           <ApplicationSpecimen />
@@ -98,6 +52,10 @@ export function Landing() {
               </dd>
             </div>
             <div>
+              <dt>Accepted</dt>
+              <dd>The employer has made an offer.</dd>
+            </div>
+            <div>
               <dt>Rejected</dt>
               <dd>The employer has ended the candidacy.</dd>
             </div>
@@ -111,36 +69,6 @@ export function Landing() {
   );
 }
 
-function SignedInMark({ email, picture }: { email: string; picture: string | null }) {
-  const [broken, setBroken] = useState(false);
-  if (!picture || broken) return <LetterMark email={email} />;
-
-  return (
-    <a className="profile" href="/notices">
-      <img
-        alt={email}
-        src={picture}
-        width={30}
-        height={30}
-        referrerPolicy="no-referrer"
-        onError={() => setBroken(true)}
-      />
-    </a>
-  );
-}
-
-function LetterMark({ email }: { email: string }) {
-  return (
-    <a className="profile profile--letter" href="/notices" aria-label={email}>
-      <span aria-hidden="true">{profileLetter(email)}</span>
-    </a>
-  );
-}
-
-function profileLetter(email: string): string {
-  return email.trim().charAt(0).toLocaleUpperCase();
-}
-
 function ApplicationSpecimen() {
   return (
     <aside className="specimen" aria-label="Example Job Application">
@@ -150,6 +78,7 @@ function ApplicationSpecimen() {
       <ol className="specimen-path">
         <li>Application Sent</li>
         <li>Interviewing</li>
+        <li>Accepted</li>
       </ol>
       <p className="specimen-source">From “Your application to Northwind Freight”</p>
     </aside>
