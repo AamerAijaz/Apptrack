@@ -17,14 +17,13 @@ public sealed class StatusContractTests
     }
 
     [Fact]
-    public void Stored_notice_accepts_every_display_name()
+    public void Hand_notice_accepts_every_display_name()
     {
         foreach (var status in Enum.GetValues<ApplicationStatus>())
         {
-            var notice = new Entities.ApplicationNotice(
-                Guid.CreateVersion7(), "m1", "Acme", null, status.DisplayName(), DateTime.UtcNow, "body");
+            var notice = IncomingNotice.TryHand("Acme", null, status.DisplayName(), Guid.CreateVersion7().ToString());
 
-            Assert.Equal(status.DisplayName(), notice.Status);
+            Assert.NotNull(notice);
         }
     }
 
@@ -43,9 +42,8 @@ public sealed class StatusContractTests
     }
 
     [Fact]
-    public void Stored_notice_rejects_other_statuses()
+    public void Hand_notice_rejects_other_statuses()
     {
-        Assert.Throws<ArgumentException>(() => new Entities.ApplicationNotice(
-            Guid.CreateVersion7(), "m1", "Acme", null, "Offer", DateTime.UtcNow, "body"));
+        Assert.Null(IncomingNotice.TryHand("Acme", null, "Offer", Guid.CreateVersion7().ToString()));
     }
 }

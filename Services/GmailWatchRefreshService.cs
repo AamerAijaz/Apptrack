@@ -26,6 +26,7 @@ public sealed class GmailWatchRefreshService(
 
             try
             {
+                logger.LogInformation("Start watch refresh!");
                 await refresh.RefreshDueAsync(stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)

@@ -1,4 +1,4 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { REMEMBERED_PROFILE_KEY } from "../auth/loadSessionProfile";
 import { Landing } from "../Landing";
 import { NoticesPage } from "./NoticesPage";
@@ -218,6 +218,74 @@ test("unmount aborts the notices request", () => {
   unmount();
 
   expect(signal?.aborted).toBe(true);
+});
+
+test("adding a notice from a stage opens a popup and puts the new card first", async () => {
+  const posted: string[] = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    const url = String(input);
+    if (url === "/api/session") return Promise.resolve(sessionResponse());
+    if (init?.method === "POST") {
+      posted.push(String(init.body));
+      return Promise.resolve(
+        jsonResponse(200, {
+          status: "Interviewing",
+          notice: card({
+            id: "0192f3a4-5b6c-7d8e-9f01-23456789ab10",
+            company: "Acme",
+            role: "Engineer",
+            sentAt: "2026-11-10T11:11:00.000Z",
+          }),
+        }),
+      );
+    }
+    return Promise.resolve(
+      jsonResponse(
+        200,
+        board({
+          1: [card({ id: "0192f3a4-5b6c-7d8e-9f01-23456789ab03", company: "Northwind Freight", role: null })],
+        }),
+      ),
+    );
+  });
+
+  render(<NoticesPage />);
+  await screen.findByRole("img", { name: "ada@gmail.com" });
+  fireEvent.click(screen.getByRole("button", { name: "Add notice to Interviewing" }));
+
+  const dialog = screen.getByRole("dialog", { name: "Add notice" });
+  expect(within(dialog).getByLabelText("Status")).toHaveValue("Interviewing");
+  fireEvent.change(within(dialog).getByLabelText("Company"), { target: { value: "Acme" } });
+  fireEvent.change(within(dialog).getByLabelText("Role"), { target: { value: "Engineer" } });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Add" }));
+
+  const lane = await screen.findByRole("region", { name: "Interviewing 2 notices" });
+  expect(within(lane).getAllByRole("article")[0]).toHaveTextContent("Acme");
+  expect(within(lane).getAllByRole("article")[1]).toHaveTextContent("Northwind Freight");
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(JSON.parse(posted[0])).toMatchObject({
+    company: "Acme",
+    role: "Engineer",
+    status: "Interviewing",
+  });
+  expect(JSON.parse(posted[0]).key).toEqual(expect.any(String));
+});
+
+test("a rejected notice stays in the popup", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    if (String(input) === "/api/session") return Promise.resolve(sessionResponse());
+    if (init?.method === "POST") return Promise.resolve(new Response(null, { status: 400 }));
+    return Promise.resolve(jsonResponse(200, board()));
+  });
+
+  render(<NoticesPage />);
+  await screen.findByRole("img", { name: "ada@gmail.com" });
+  fireEvent.click(screen.getByRole("button", { name: "Add notice to Accepted" }));
+  fireEvent.click(screen.getByRole("button", { name: "Add" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("A notice needs a company.");
+  expect(screen.getByRole("dialog", { name: "Add notice" })).toBeInTheDocument();
+  expect(screen.getByLabelText("Status")).toHaveValue("Accepted");
 });
 
 test("the landing page shows the connect failure only for the exact query", async () => {

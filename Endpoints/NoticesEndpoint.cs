@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Apptrack.Auth;
 using Apptrack.Services;
 
@@ -9,13 +10,57 @@ public sealed record NoticeBoardDto(string Email, IReadOnlyList<NoticeLaneDto> L
 
 public sealed record NoticeLanePageDto(string Email, string Status, IReadOnlyList<NoticeCard> Notices, int Limit);
 
+public sealed record AddedNoticeDto(string Status, NoticeCard Notice);
+
 public static class NoticesEndpoint
 {
+    private sealed record HandNoticeBody(string? Company, string? Role, string? Status, string? Key);
+
     public static IEndpointRouteBuilder MapNotices(this IEndpointRouteBuilder app)
     {
         app.MapGet("/api/notices", GetAsync);
         app.MapGet("/api/notices/lane", GetLaneAsync);
+        app.MapPost("/api/notices", AddAsync);
         return app;
+    }
+
+    /// <summary>
+    /// Cookie user only. 401 clears the cookie when the person is missing.
+    /// 400 and 409 leave the cookie. 200 is create and replay.
+    /// </summary>
+    public static async Task<IResult> AddAsync(
+        HttpContext ctx, SessionCookie session, NoticesService notices, CancellationToken ct)
+    {
+        if (session.Read(ctx.Request) is not Guid userId)
+            return Results.Unauthorized();
+
+        HandNoticeBody? body;
+        try
+        {
+            body = await ctx.Request.ReadFromJsonAsync<HandNoticeBody>(ct);
+        }
+        catch (JsonException)
+        {
+            return Results.BadRequest();
+        }
+
+        var incoming = IncomingNotice.TryHand(body?.Company, body?.Role, body?.Status, body?.Key);
+        if (incoming is null)
+            return Results.BadRequest();
+
+        switch (await notices.Add(userId, incoming, ct))
+        {
+            case AddNoticeResult.MissingPerson:
+                session.Clear(ctx.Response);
+                return Results.Unauthorized();
+            case AddNoticeResult.Retired:
+                return Results.Conflict();
+            case AddNoticeResult.Stored stored:
+                ctx.Response.Headers.CacheControl = "no-store";
+                return Results.Ok(new AddedNoticeDto(stored.Status.Label, stored.Card));
+            default:
+                throw new InvalidOperationException("Adding a notice produced an unknown result.");
+        }
     }
 
     public static async Task<IResult> GetAsync(

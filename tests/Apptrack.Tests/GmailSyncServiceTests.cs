@@ -33,7 +33,8 @@ public sealed class GmailSyncServiceTests : IDisposable
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { ["Google:TopicName"] = "projects/app/topics/gmail" })
             .Build();
-        _sync = new GmailSyncService(_db, _mailboxes, _notices, configuration, _logger);
+        _sync = new GmailSyncService(
+            _db, _mailboxes, _notices, new NoticesService(_db, TimeProvider.System), configuration, _logger);
     }
 
     [Fact]

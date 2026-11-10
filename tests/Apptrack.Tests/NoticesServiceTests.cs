@@ -5,6 +5,7 @@ using Apptrack.Data;
 using Apptrack.Entities;
 using Apptrack.Endpoints;
 using Apptrack.Services;
+using Apptrack.Services.NoticeExtraction;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.HttpResults;
@@ -33,7 +34,7 @@ public sealed class NoticesServiceTests : IDisposable
             .Options;
         _db = new AppDbContext(options);
         _db.Database.EnsureCreated();
-        _notices = new NoticesService(_db);
+        _notices = new NoticesService(_db, new AdvancingTime(new DateTimeOffset(2026, 11, 1, 0, 0, 0, TimeSpan.Zero)));
     }
 
     [Fact]
@@ -70,8 +71,8 @@ public sealed class NoticesServiceTests : IDisposable
     public async Task Notices_are_projected_newest_first_with_utc_sent_at()
     {
         var userId = await SeedUser("ada@example.com");
-        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Application Sent", At(1));
-        await SeedNotice(userId, "inbox-2", "Beta", null, "Application Sent", At(3));
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Application Sent", At(3));
+        await SeedNotice(userId, "inbox-2", "Beta", null, "Application Sent", At(1));
         await SeedNotice(userId, "inbox-3", "Northwind Freight", "Data Analyst", "Interviewing", At(2));
         _db.ChangeTracker.Clear();
 
@@ -81,7 +82,7 @@ public sealed class NoticesServiceTests : IDisposable
         Assert.Equal(["Beta", "Acme"], page.Notices.Select(n => n.Company));
         var beta = page.Notices[0];
         Assert.Null(beta.Role);
-        Assert.Equal(At(3), beta.SentAt);
+        Assert.Equal(At(1), beta.SentAt);
         Assert.Equal(DateTimeKind.Utc, beta.SentAt.Kind);
         Assert.All(page.Notices, n => Assert.Equal(DateTimeKind.Utc, n.SentAt.Kind));
 
@@ -104,7 +105,7 @@ public sealed class NoticesServiceTests : IDisposable
         var third = await _notices.GetNotices(userId, NoticeStatus.ApplicationSent, 2, 4, CancellationToken.None);
 
         var expected = await _db.ApplicationNotices
-            .OrderByDescending(n => n.SentAt)
+            .OrderByDescending(n => n.CreatedAt)
             .ThenByDescending(n => n.Id)
             .Select(n => n.Id)
             .ToListAsync();
@@ -253,6 +254,68 @@ public sealed class NoticesServiceTests : IDisposable
         Assert.Contains("path=/api", Assert.Single(ctx.Response.Headers.SetCookie.ToArray())!);
     }
 
+    [Fact]
+    public async Task Adding_a_notice_puts_the_newest_card_first_and_replay_keeps_the_first_body()
+    {
+        var userId = await SeedUser("ada@example.com");
+        var firstKey = Guid.CreateVersion7();
+        var ctx = HandContext(userId, firstKey, "Acme", "Engineer", "Interviewing");
+        var created = await NoticesEndpoint.AddAsync(ctx, _session, _notices, CancellationToken.None);
+        var ok = Assert.IsType<Ok<AddedNoticeDto>>(created);
+        Assert.Equal("Interviewing", ok.Value!.Status);
+        Assert.Equal("Acme", ok.Value.Notice.Company);
+        Assert.Equal("no-store", ctx.Response.Headers.CacheControl.ToString());
+
+        var replay = await AddHand(userId, firstKey, "Other", "", "Interviewing");
+        var again = Assert.IsType<Ok<AddedNoticeDto>>(replay);
+        Assert.Equal(ok.Value.Notice.Id, again.Value!.Notice.Id);
+        Assert.Equal("Acme", again.Value.Notice.Company);
+
+        await AddHand(userId, Guid.CreateVersion7(), "Beta", "", "Interviewing");
+        var page = await _notices.GetNotices(userId, NoticeStatus.Interviewing, 12, 0, CancellationToken.None);
+        Assert.Equal(["Beta", "Acme"], page!.Notices.Select(n => n.Company));
+    }
+
+    [Fact]
+    public async Task A_blank_company_is_400_and_leaves_the_session()
+    {
+        var userId = await SeedUser("ada@example.com");
+        var ctx = HandContext(userId, Guid.CreateVersion7(), "  ", null, "Interviewing");
+
+        var result = await NoticesEndpoint.AddAsync(ctx, _session, _notices, CancellationToken.None);
+
+        Assert.IsType<BadRequest>(result);
+        Assert.Equal(0, ctx.Response.Headers.SetCookie.Count);
+    }
+
+    [Fact]
+    public async Task A_retired_key_is_409_and_leaves_the_session()
+    {
+        var userId = await SeedUser("ada@example.com");
+        var key = Guid.CreateVersion7();
+        await AddHand(userId, key, "Acme", null, "Accepted");
+        await _db.Database.ExecuteSqlRawAsync(
+            "UPDATE application_notices SET DeletedAt = {0} WHERE Company = 'Acme'", DateTime.UtcNow);
+        _db.ChangeTracker.Clear();
+
+        var ctx = HandContext(userId, key, "Acme", null, "Accepted");
+        var result = await NoticesEndpoint.AddAsync(ctx, _session, _notices, CancellationToken.None);
+
+        Assert.IsType<Conflict>(result);
+        Assert.Equal(0, ctx.Response.Headers.SetCookie.Count);
+    }
+
+    [Fact]
+    public async Task Add_for_a_missing_person_is_401_and_clears_the_session()
+    {
+        var ctx = HandContext(Guid.CreateVersion7(), Guid.CreateVersion7(), "Acme", null, "Rejected");
+
+        var result = await NoticesEndpoint.AddAsync(ctx, _session, _notices, CancellationToken.None);
+
+        Assert.IsType<UnauthorizedHttpResult>(result);
+        Assert.Contains("path=/api", Assert.Single(ctx.Response.Headers.SetCookie.ToArray())!);
+    }
+
     public void Dispose()
     {
         _db.Dispose();
@@ -270,6 +333,21 @@ public sealed class NoticesServiceTests : IDisposable
         return ctx;
     }
 
+    private Task<IResult> AddHand(Guid userId, Guid key, string company, string? role, string status) =>
+        NoticesEndpoint.AddAsync(
+            HandContext(userId, key, company, role, status), _session, _notices, CancellationToken.None);
+
+    private DefaultHttpContext HandContext(Guid userId, Guid key, string company, string? role, string status)
+    {
+        var ctx = WithSession(userId);
+        var json = JsonSerializer.Serialize(
+            new { company, role, status, key = key.ToString() },
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        ctx.Request.Body = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(json));
+        ctx.Request.ContentType = "application/json";
+        return ctx;
+    }
+
     private static DateTime At(int day) => new(2026, 11, day, 9, 0, 0, DateTimeKind.Utc);
 
     private async Task<Guid> SeedUser(string email)
@@ -282,8 +360,15 @@ public sealed class NoticesServiceTests : IDisposable
 
     private async Task SeedNotice(Guid userId, string messageId, string company, string? role, string status, DateTime sentAt)
     {
-        _db.ApplicationNotices.Add(new ApplicationNotice(userId, messageId, company, role, status, sentAt, "body"));
-        await _db.SaveChangesAsync();
+        Assert.True(ApplicationStatusText.TryFromDisplayName(status, out var parsed));
+        var extracted = new Apptrack.Services.NoticeExtraction.ApplicationNotice(
+            company,
+            role is null ? ApplicationRole.Unnamed : ApplicationRole.Named(role),
+            parsed,
+            new DateTimeOffset(sentAt));
+        var incoming = IncomingNotice.FromMailbox(messageId, extracted, "body");
+        var stored = await _notices.Add(userId, incoming!, CancellationToken.None);
+        Assert.IsType<AddNoticeResult.Stored>(stored);
     }
 
     private sealed class CommandLog : DbCommandInterceptor
@@ -296,5 +381,17 @@ public sealed class NoticesServiceTests : IDisposable
             Texts.Add(command.CommandText);
             return base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
         }
+    }
+}
+
+internal sealed class AdvancingTime(DateTimeOffset start) : TimeProvider
+{
+    private DateTimeOffset _now = start;
+
+    public override DateTimeOffset GetUtcNow()
+    {
+        var current = _now;
+        _now += TimeSpan.FromSeconds(1);
+        return current;
     }
 }

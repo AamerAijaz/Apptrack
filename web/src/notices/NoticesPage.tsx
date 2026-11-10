@@ -2,10 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ConnectGmail } from "../auth/ConnectGmail";
 import { Masthead, useMastheadSession } from "../Masthead";
 import {
+  addNotice as postNotice,
   getNotices,
   loadBoard,
   NOTICES_PATH,
+  type AddNoticeResult,
   type BoardResult,
+  type HandDraft,
   type NoticeCard,
   type NoticeLane,
 } from "./loadNotices";
@@ -29,7 +32,21 @@ export type NoticesPageState =
   | { kind: "failed" }
   | { kind: "ready"; email: string; lanes: readonly LaneState[] };
 
-export function useNoticesPage(): NoticesPageState & { loadMore?: (status: NoticeStatus) => void } {
+type AddDraft =
+  | { kind: "closed" }
+  | {
+      kind: "open";
+      status: NoticeStatus;
+      key: string;
+      company: string;
+      role: string;
+      phase: "editing" | "saving" | "rejected" | "retired" | "failed";
+    };
+
+export function useNoticesPage(): NoticesPageState & {
+  loadMore?: (status: NoticeStatus) => void;
+  addNotice?: (draft: HandDraft) => Promise<AddNoticeResult>;
+} {
   const [state, setState] = useState<NoticesPageState>({ kind: "loading" });
   const stateRef = useRef(state);
   const abortRef = useRef<AbortController | null>(null);
@@ -99,20 +116,59 @@ export function useNoticesPage(): NoticesPageState & { loadMore?: (status: Notic
     );
   }, []);
 
-  return state.kind === "ready" ? { ...state, loadMore } : state;
+  const submitNotice = useCallback((draft: HandDraft) => {
+    return postNotice(draft, abortRef.current?.signal).then(
+      (result) => {
+        setState((latest) => {
+          if (latest.kind !== "ready") return latest;
+          if (result.kind === "signed-out") return { kind: "signed-out" };
+          if (result.kind !== "stored") return latest;
+          return prependCard(latest, result.status, result.notice);
+        });
+        return result;
+      },
+      (error: unknown) => {
+        if (isAbortError(error)) return { kind: "failed" } satisfies AddNoticeResult;
+        return { kind: "failed" } satisfies AddNoticeResult;
+      },
+    );
+  }, []);
+
+  return state.kind === "ready" ? { ...state, loadMore, addNotice: submitNotice } : state;
 }
 
 export function NoticesPage() {
   const session = useMastheadSession();
   const state = useNoticesPage();
   const loadMore = state.kind === "ready" ? state.loadMore : undefined;
+  const submitNotice = state.kind === "ready" ? state.addNotice : undefined;
+  const [adding, setAdding] = useState<AddDraft>({ kind: "closed" });
+
+  function open(status: NoticeStatus) {
+    setAdding({
+      kind: "open",
+      status,
+      key: crypto.randomUUID(),
+      company: "",
+      role: "",
+      phase: "editing",
+    });
+  }
 
   return (
     <>
       <Masthead session={session} signedOut={state.kind === "signed-out"} />
       <main className="notice-sheet">
         <h1>Application Notices</h1>
-        <NoticesBody state={state} onLoadMore={loadMore} />
+        <NoticesBody state={state} onLoadMore={loadMore} onAdd={submitNotice ? open : undefined} />
+        {adding.kind === "open" && submitNotice ? (
+          <AddNoticeDialog
+            draft={adding}
+            onDraft={setAdding}
+            onSubmit={submitNotice}
+            onClose={() => setAdding({ kind: "closed" })}
+          />
+        ) : null}
       </main>
     </>
   );
@@ -121,9 +177,11 @@ export function NoticesPage() {
 function NoticesBody({
   state,
   onLoadMore,
+  onAdd,
 }: {
   state: NoticesPageState;
   onLoadMore?: (status: NoticeStatus) => void;
+  onAdd?: (status: NoticeStatus) => void;
 }) {
   switch (state.kind) {
     case "loading":
@@ -149,7 +207,7 @@ function NoticesBody({
           {allEmpty ? <p className="notice-empty-copy">{EMPTY_COPY}</p> : null}
           <div className="notice-board">
             {state.lanes.map((lane) => (
-              <NoticeRow key={lane.status} lane={lane} onLoadMore={onLoadMore} />
+              <NoticeRow key={lane.status} lane={lane} onLoadMore={onLoadMore} onAdd={onAdd} />
             ))}
           </div>
         </>
@@ -161,9 +219,11 @@ function NoticesBody({
 function NoticeRow({
   lane,
   onLoadMore,
+  onAdd,
 }: {
   lane: LaneState;
   onLoadMore?: (status: NoticeStatus) => void;
+  onAdd?: (status: NoticeStatus) => void;
 }) {
   const headingId = `notice-lane-${lane.tone}`;
   const hasMore = lane.more && lane.phase === "idle";
@@ -171,15 +231,27 @@ function NoticeRow({
 
   return (
     <section className={`notice-lane notice-lane--${lane.tone}`} aria-labelledby={headingId}>
-      <h2 id={headingId}>
-        {lane.status}{" "}
-        <span className="notice-count">
-          {lane.notices.length}
-          <span className="visually-hidden">
-            {lane.notices.length === 1 ? " notice" : " notices"}
+      <div className="notice-lane-head">
+        <h2 id={headingId}>
+          {lane.status}{" "}
+          <span className="notice-count">
+            {lane.notices.length}
+            <span className="visually-hidden">
+              {lane.notices.length === 1 ? " notice" : " notices"}
+            </span>
           </span>
-        </span>
-      </h2>
+        </h2>
+        {onAdd ? (
+          <button
+            type="button"
+            className="notice-add"
+            aria-label={`Add notice to ${lane.status}`}
+            onClick={() => onAdd(lane.status)}
+          >
+            Add notice
+          </button>
+        ) : null}
+      </div>
       <ul className="notice-lane-track">
         {lane.notices.map((notice) => (
           <li key={notice.id}>
@@ -243,6 +315,132 @@ function useNearEnd(enabled: boolean, onNearEnd: () => void) {
   }, [enabled]);
 
   return ref;
+}
+
+function prependCard(
+  state: Extract<NoticesPageState, { kind: "ready" }>,
+  status: NoticeStatus,
+  notice: NoticeCard,
+): NoticesPageState {
+  return {
+    ...state,
+    lanes: state.lanes.map((lane) => {
+      if (lane.status !== status) return lane;
+      if (lane.notices.some((item) => item.id === notice.id)) return lane;
+      return { ...lane, notices: [notice, ...lane.notices] };
+    }),
+  };
+}
+
+function AddNoticeDialog({
+  draft,
+  onDraft,
+  onSubmit,
+  onClose,
+}: {
+  draft: Extract<AddDraft, { kind: "open" }>;
+  onDraft: (draft: AddDraft) => void;
+  onSubmit: (draft: HandDraft) => Promise<AddNoticeResult>;
+  onClose: () => void;
+}) {
+  const titleId = "add-notice-title";
+  const saving = draft.phase === "saving";
+
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape" && !saving) onClose();
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose, saving]);
+
+  async function submit() {
+    if (saving) return;
+    onDraft({ ...draft, phase: "saving" });
+    const result = await onSubmit({
+      status: draft.status,
+      company: draft.company,
+      role: draft.role,
+      key: draft.key,
+    });
+    if (result.kind === "stored" || result.kind === "signed-out") {
+      onClose();
+      return;
+    }
+    if (result.kind === "rejected") onDraft({ ...draft, phase: "rejected" });
+    else if (result.kind === "retired") onDraft({ ...draft, phase: "retired" });
+    else onDraft({ ...draft, phase: "failed" });
+  }
+
+  return (
+    <div className="notice-dialog-backdrop">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="notice-dialog"
+      >
+        <h2 id={titleId}>Add notice</h2>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submit();
+          }}
+        >
+          <label>
+            Company
+            <input
+              value={draft.company}
+              onChange={(event) => onDraft({ ...draft, company: event.target.value })}
+              autoFocus
+              disabled={saving}
+            />
+          </label>
+          <label>
+            Role
+            <input
+              value={draft.role}
+              onChange={(event) => onDraft({ ...draft, role: event.target.value })}
+              disabled={saving}
+            />
+          </label>
+          <label>
+            Status
+            <input value={draft.status} readOnly />
+          </label>
+          {draft.phase === "rejected" ? <p role="alert">A notice needs a company.</p> : null}
+          {draft.phase === "retired" ? (
+            <p role="alert">That notice was removed.</p>
+          ) : null}
+          {draft.phase === "failed" ? <p role="alert">Couldn't add the notice. Try again.</p> : null}
+          <div className="notice-dialog-actions">
+            <button type="button" className="notice-retry" onClick={onClose} disabled={saving}>
+              Cancel
+            </button>
+            {draft.phase === "retired" ? (
+              <button
+                type="button"
+                className="notice-add"
+                onClick={() =>
+                  onDraft({
+                    ...draft,
+                    key: crypto.randomUUID(),
+                    phase: "editing",
+                  })
+                }
+              >
+                Try again
+              </button>
+            ) : (
+              <button type="submit" className="notice-add" disabled={saving}>
+                Add
+              </button>
+            )}
+          </div>
+        </form>
+      </div>
+    </div>
+  );
 }
 
 function boardToState(result: BoardResult): NoticesPageState {

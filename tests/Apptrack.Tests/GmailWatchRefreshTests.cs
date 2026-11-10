@@ -36,6 +36,7 @@ public sealed class GmailWatchRefreshTests : IDisposable
         services.AddSingleton<NoticeExtraction.IApplicationNoticeExtractor>(new IdleNotices());
         services.AddSingleton<IConfiguration>(configuration);
         services.AddLogging();
+        services.AddScoped<NoticesService>();
         services.AddScoped<GmailSyncService>();
         services.AddSingleton<TimeProvider>(_time);
         services.AddSingleton<GmailWatchRefresh>();

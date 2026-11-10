@@ -16,6 +16,7 @@ public sealed class GmailSyncService(
     AppDbContext db,
     IMailboxClientFactory mailboxes,
     IApplicationNoticeExtractor notices,
+    NoticesService noticeStore,
     IConfiguration configuration,
     ILogger<GmailSyncService> logger)
 {
@@ -61,52 +62,20 @@ public sealed class GmailSyncService(
                     ex);
             }
 
-            if (notice is not null)
-            {
-                await StoreNoticeAsync(user.Id, message, notice, ct);
-            }
+            if (notice is null)
+                continue;
+
+            var incoming = IncomingNotice.FromMailbox(message.MessageId, notice, message.Content);
+            if (incoming is null)
+                continue;
+
+            if (await noticeStore.Add(user.Id, incoming, ct) is AddNoticeResult.MissingPerson)
+                return;
         }
 
         await db.GmailWatches
             .Where(w => w.UserId == user.Id && w.HistoryId < batch.HistoryId)
             .ExecuteUpdateAsync(setters => setters.SetProperty(w => w.HistoryId, batch.HistoryId), ct);
-    }
-
-    private async Task StoreNoticeAsync(Guid userId, MailMessage message, ApplicationNotice notice, CancellationToken ct)
-    {
-        var alreadyStored = await db.ApplicationNotices
-            .IgnoreQueryFilters()
-            .AnyAsync(n => n.UserId == userId && n.MessageId == message.MessageId, ct);
-        if (alreadyStored)
-            return;
-
-        db.ApplicationNotices.Add(new Entities.ApplicationNotice(
-            userId,
-            message.MessageId,
-            notice.Company,
-            notice.Role.Title,
-            notice.Status.DisplayName(),
-            notice.SentAt.UtcDateTime,
-            message.Content));
-
-        try
-        {
-            await db.SaveChangesAsync(ct);
-        }
-        catch (DbUpdateException)
-        {
-            foreach (var entry in db.ChangeTracker.Entries<Entities.ApplicationNotice>().ToList())
-            {
-                if (entry.State == EntityState.Added)
-                    entry.State = EntityState.Detached;
-            }
-
-            var stored = await db.ApplicationNotices
-                .IgnoreQueryFilters()
-                .AnyAsync(n => n.UserId == userId && n.MessageId == message.MessageId, ct);
-            if (!stored)
-                throw;
-        }
     }
 
     public async Task StartWatchAsync(Guid userId, CancellationToken ct = default)

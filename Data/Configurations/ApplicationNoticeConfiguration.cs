@@ -34,7 +34,7 @@ public sealed class ApplicationNoticeConfiguration : IEntityTypeConfiguration<Ap
             .OnDelete(DeleteBehavior.Restrict);
 
         builder.HasIndex(n => new { n.UserId, n.MessageId }).IsUnique();
-        builder.HasIndex(n => new { n.UserId, n.Status, n.SentAt, n.Id })
+        builder.HasIndex(n => new { n.UserId, n.Status, n.CreatedAt, n.Id })
             .IsDescending(false, false, true, true)
             .HasFilter("\"DeletedAt\" IS NULL")
             .HasDatabaseName("IX_application_notices_lane");

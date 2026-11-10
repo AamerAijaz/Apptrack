@@ -9,37 +9,36 @@ public sealed class ApplicationNotice
 
     private ApplicationNotice() { }
 
-    public ApplicationNotice(
+    /// <summary>
+    /// Trusts <see cref="CompanyName"/>, <see cref="RoleName"/>, <see cref="NoticeStatus"/>, and <see cref="UtcInstant"/>.
+    /// The id and <see cref="CreatedAt"/> both come from <paramref name="createdAt"/>.
+    /// </summary>
+    internal ApplicationNotice(
         Guid userId,
         string messageId,
-        string company,
-        string? role,
-        string status,
-        DateTime sentAtUtc,
+        CompanyName company,
+        RoleName? role,
+        NoticeStatus status,
+        UtcInstant sentAt,
+        UtcInstant createdAt,
         string content)
     {
         if (userId == Guid.Empty)
             throw new ArgumentException("A notice requires a person.", nameof(userId));
         if (string.IsNullOrWhiteSpace(messageId) || messageId.Length > MessageIdMaxLength)
-            throw new ArgumentException("A notice requires a Gmail message id.", nameof(messageId));
-        if (string.IsNullOrWhiteSpace(company))
-            throw new ArgumentException("A notice requires a company.", nameof(company));
-        if (NoticeStatus.FromLabel(status) is null)
-            throw new ArgumentException("A notice requires a known status.", nameof(status));
-        if (sentAtUtc == default)
-            throw new ArgumentException("A notice requires the time the mail was sent.", nameof(sentAtUtc));
+            throw new ArgumentException("A notice requires a message id.", nameof(messageId));
         if (content is null)
             throw new ArgumentException("A notice requires message content.", nameof(content));
 
-        Id = Guid.CreateVersion7();
+        Id = Guid.CreateVersion7(new DateTimeOffset(createdAt.Value));
         UserId = userId;
         MessageId = messageId;
-        Company = company.Trim();
-        Role = string.IsNullOrWhiteSpace(role) ? null : role.Trim();
-        Status = status;
-        SentAt = DateTime.SpecifyKind(sentAtUtc, DateTimeKind.Utc);
+        Company = company.Value;
+        Role = role?.Value;
+        Status = status.Label;
+        SentAt = sentAt.Value;
         Content = content;
-        CreatedAt = DateTime.UtcNow;
+        CreatedAt = createdAt.Value;
     }
 
     public Guid Id { get; private set; }

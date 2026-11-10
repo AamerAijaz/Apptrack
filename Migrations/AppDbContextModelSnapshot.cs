@@ -65,7 +65,7 @@ namespace apptrack.Migrations
                     b.HasIndex("UserId", "MessageId")
                         .IsUnique();
 
-                    b.HasIndex("UserId", "Status", "SentAt", "Id")
+                    b.HasIndex("UserId", "Status", "CreatedAt", "Id")
                         .HasDatabaseName("IX_application_notices_lane")
                         .HasFilter("\"DeletedAt\" IS NULL")
                         .IsDescending(false, false, true, true);

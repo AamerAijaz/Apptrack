@@ -5,6 +5,7 @@ using Apptrack.Data;
 using Apptrack.Endpoints;
 using Apptrack.Entities;
 using Apptrack.Services;
+using Apptrack.Services.NoticeExtraction;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.HttpResults;
@@ -183,9 +184,12 @@ public sealed class SessionProfileTests : IDisposable
     public async Task Session_read_does_not_query_notices()
     {
         var userId = await SeedUser("ada@example.com");
-        _db.ApplicationNotices.Add(new ApplicationNotice(
-            userId, "inbox-1", "Acme", "Engineer", "Application Sent", DateTime.UtcNow, "body"));
-        await _db.SaveChangesAsync();
+        var incoming = IncomingNotice.FromMailbox(
+            "inbox-1",
+            new Apptrack.Services.NoticeExtraction.ApplicationNotice(
+                "Acme", ApplicationRole.Named("Engineer"), ApplicationStatus.ApplicationSent, DateTimeOffset.UtcNow),
+            "body");
+        await new NoticesService(_db, TimeProvider.System).Add(userId, incoming!, CancellationToken.None);
         _db.ChangeTracker.Clear();
         _commands.Texts.Clear();
 

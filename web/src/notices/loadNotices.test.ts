@@ -1,9 +1,53 @@
-import { getNotices, loadBoard } from "./loadNotices";
+import { addNotice, getNotices, loadBoard } from "./loadNotices";
 import { REMEMBERED_PROFILE_KEY } from "../auth/loadSessionProfile";
 
 afterEach(() => {
   vi.restoreAllMocks();
   localStorage.clear();
+});
+
+test("add posts the draft and returns the stored card", async () => {
+  const fetchSpy = mockJson(200, {
+    status: "Interviewing",
+    notice: card({ company: "Acme", role: "Engineer" }),
+  });
+
+  const result = await addNotice({
+    status: "Interviewing",
+    company: "Acme",
+    role: "Engineer",
+    key: "6f1c1d1e-2b3a-4c5d-8e9f-0a1b2c3d4e5f",
+  });
+
+  expect(fetchSpy).toHaveBeenCalledWith(
+    "/api/notices",
+    expect.objectContaining({
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        status: "Interviewing",
+        company: "Acme",
+        role: "Engineer",
+        key: "6f1c1d1e-2b3a-4c5d-8e9f-0a1b2c3d4e5f",
+      }),
+    }),
+  );
+  expect(result.kind).toBe("stored");
+  if (result.kind !== "stored") return;
+  expect(result.status).toBe("Interviewing");
+  expect(result.notice.company).toBe("Acme");
+});
+
+test("a blank company is rejected and a removed key is retired", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(null, { status: 400 }));
+  await expect(
+    addNotice({ status: "Accepted", company: " ", role: "", key: "6f1c1d1e-2b3a-4c5d-8e9f-0a1b2c3d4e5f" }),
+  ).resolves.toEqual({ kind: "rejected" });
+
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(null, { status: 409 }));
+  await expect(
+    addNotice({ status: "Accepted", company: "Acme", role: "", key: "6f1c1d1e-2b3a-4c5d-8e9f-0a1b2c3d4e5f" }),
+  ).resolves.toEqual({ kind: "retired" });
 });
 
 test("the board request is GET /api/notices as JSON", async () => {

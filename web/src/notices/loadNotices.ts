@@ -45,6 +45,33 @@ export async function loadBoard(signal?: AbortSignal): Promise<BoardResult> {
   return { kind: "ready", email: parsed.email, lanes: parsed.lanes };
 }
 
+export type AddNoticeResult =
+  | { kind: "signed-out" }
+  | { kind: "rejected" }
+  | { kind: "retired" }
+  | { kind: "failed" }
+  | { kind: "stored"; status: NoticeStatus; notice: NoticeCard };
+
+export type HandDraft = {
+  readonly status: NoticeStatus;
+  readonly company: string;
+  readonly role: string;
+  readonly key: string;
+};
+
+export async function addNotice(draft: HandDraft, signal?: AbortSignal): Promise<AddNoticeResult> {
+  const response = await postJson(BOARD_API, draft, signal);
+  if (response.kind === "signed-out" || response.kind === "rejected" || response.kind === "retired" || response.kind === "failed") {
+    return response;
+  }
+
+  if (!isRecord(response.body)) return { kind: "failed" };
+  const status = parseStatus(response.body.status);
+  const notice = parseCard(response.body.notice);
+  if (status === null || notice === null) return { kind: "failed" };
+  return { kind: "stored", status, notice };
+}
+
 export async function getNotices(
   status: NoticeStatus,
   limit: number,
@@ -64,6 +91,33 @@ export async function getNotices(
   return parsed;
 }
 
+async function postJson(
+  url: string,
+  json: unknown,
+  signal?: AbortSignal,
+): Promise<
+  | { kind: "ok"; body: unknown }
+  | { kind: "signed-out" }
+  | { kind: "rejected" }
+  | { kind: "retired" }
+  | { kind: "failed" }
+> {
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify(json),
+      signal,
+    });
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    return { kind: "failed" };
+  }
+
+  return readBody(response, 200, true);
+}
+
 async function request(
   url: string,
   signal?: AbortSignal,
@@ -80,11 +134,29 @@ async function request(
     return { kind: "failed" };
   }
 
+  const settled = await readBody(response, 200, false);
+  if (settled.kind === "rejected" || settled.kind === "retired") return { kind: "failed" };
+  return settled;
+}
+
+async function readBody(
+  response: Response,
+  okStatus: number,
+  distinguishClientErrors: boolean,
+): Promise<
+  | { kind: "ok"; body: unknown }
+  | { kind: "signed-out" }
+  | { kind: "rejected" }
+  | { kind: "retired" }
+  | { kind: "failed" }
+> {
   if (response.status === 401) {
     forgetProfile();
     return { kind: "signed-out" };
   }
-  if (response.status !== 200) return { kind: "failed" };
+  if (distinguishClientErrors && response.status === 400) return { kind: "rejected" };
+  if (distinguishClientErrors && response.status === 409) return { kind: "retired" };
+  if (response.status !== okStatus) return { kind: "failed" };
 
   try {
     return { kind: "ok", body: await response.json() };
