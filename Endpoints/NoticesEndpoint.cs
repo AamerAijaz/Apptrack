@@ -21,7 +21,50 @@ public static class NoticesEndpoint
         app.MapGet("/api/notices", GetAsync);
         app.MapGet("/api/notices/lane", GetLaneAsync);
         app.MapPost("/api/notices", AddAsync);
+        app.MapPatch("/api/notices/{id:guid}", MoveAsync);
         return app;
+    }
+
+    private sealed record MoveNoticeBody(string? Status);
+
+    /// <summary>
+    /// Cookie user only. 401 clears the cookie when the person is missing.
+    /// 400 leaves the cookie. 404 is a notice the person does not have.
+    /// 200 is the move and a repeat move to the same stage.
+    /// </summary>
+    public static async Task<IResult> MoveAsync(
+        HttpContext ctx, SessionCookie session, NoticesService notices, Guid id, CancellationToken ct)
+    {
+        if (session.Read(ctx.Request) is not Guid userId)
+            return Results.Unauthorized();
+
+        MoveNoticeBody? body;
+        try
+        {
+            body = await ctx.Request.ReadFromJsonAsync<MoveNoticeBody>(ct);
+        }
+        catch (JsonException)
+        {
+            return Results.BadRequest();
+        }
+
+        var status = NoticeStatus.FromLabel(body?.Status);
+        if (status is null)
+            return Results.BadRequest();
+
+        switch (await notices.Move(userId, id, status, ct))
+        {
+            case MoveNoticeResult.MissingPerson:
+                session.Clear(ctx.Response);
+                return Results.Unauthorized();
+            case MoveNoticeResult.NotFound:
+                return Results.NotFound();
+            case MoveNoticeResult.Stored stored:
+                ctx.Response.Headers.CacheControl = "no-store";
+                return Results.Ok(new AddedNoticeDto(stored.Status.Label, stored.Card));
+            default:
+                throw new InvalidOperationException("Moving a notice produced an unknown result.");
+        }
     }
 
     /// <summary>

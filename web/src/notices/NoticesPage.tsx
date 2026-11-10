@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { ConnectGmail } from "../auth/ConnectGmail";
 import { Masthead, useMastheadSession } from "../Masthead";
 import {
   addNotice as postNotice,
   getNotices,
   loadBoard,
+  moveNotice as patchNotice,
   NOTICES_PATH,
   type AddNoticeResult,
   type BoardResult,
@@ -12,7 +13,7 @@ import {
   type NoticeCard,
   type NoticeLane,
 } from "./loadNotices";
-import type { NoticeStatus, NoticeTone } from "./statuses";
+import { parseStatus, type NoticeStatus, type NoticeTone } from "./statuses";
 
 const EMPTY_COPY =
   "No Application Notices yet. AppTrack reads new mail from now on. Notices appear here as companies write to you.";
@@ -46,10 +47,12 @@ type AddDraft =
 export function useNoticesPage(): NoticesPageState & {
   loadMore?: (status: NoticeStatus) => void;
   addNotice?: (draft: HandDraft) => Promise<AddNoticeResult>;
+  moveNotice?: (id: string, status: NoticeStatus) => void;
 } {
   const [state, setState] = useState<NoticesPageState>({ kind: "loading" });
   const stateRef = useRef(state);
   const abortRef = useRef<AbortController | null>(null);
+  const moveEpoch = useRef(0);
 
   useEffect(() => {
     stateRef.current = state;
@@ -134,7 +137,59 @@ export function useNoticesPage(): NoticesPageState & {
     );
   }, []);
 
-  return state.kind === "ready" ? { ...state, loadMore, addNotice: submitNotice } : state;
+  const relocate = useCallback((id: string, status: NoticeStatus) => {
+    const current = stateRef.current;
+    if (current.kind !== "ready") return;
+    const source = current.lanes.find((lane) => lane.notices.some((notice) => notice.id === id));
+    const destination = current.lanes.find((lane) => lane.status === status);
+    if (source === undefined || destination === undefined || source.status === status) return;
+
+    const limit = Math.min(50, destination.notices.length + 1);
+    const epoch = moveEpoch.current + 1;
+    moveEpoch.current = epoch;
+    patchNotice(id, status, abortRef.current?.signal).then(
+      async (result) => {
+        if (moveEpoch.current !== epoch) return;
+        if (result.kind === "signed-out") {
+          setState({ kind: "signed-out" });
+          return;
+        }
+        if (result.kind !== "stored" || result.status !== status) return;
+
+        const page = await getNotices(status, limit, 0, abortRef.current?.signal);
+        if (moveEpoch.current !== epoch) return;
+        setState((latest) => {
+          if (latest.kind !== "ready") return latest;
+          if (page.kind === "signed-out") return { kind: "signed-out" };
+          if (page.kind !== "ready" || page.status !== status) return latest;
+          return {
+            ...latest,
+            lanes: latest.lanes.map((lane) => {
+              if (lane.status !== status) {
+                return lane.notices.some((notice) => notice.id === id)
+                  ? { ...lane, notices: lane.notices.filter((notice) => notice.id !== id) }
+                  : lane;
+              }
+              return {
+                ...lane,
+                phase: "idle",
+                notices: page.notices,
+                limit: page.limit,
+                more: page.notices.length === page.limit,
+              };
+            }),
+          };
+        });
+      },
+      (error: unknown) => {
+        if (isAbortError(error)) return;
+      },
+    );
+  }, []);
+
+  return state.kind === "ready"
+    ? { ...state, loadMore, addNotice: submitNotice, moveNotice: relocate }
+    : state;
 }
 
 export function NoticesPage() {
@@ -142,6 +197,7 @@ export function NoticesPage() {
   const state = useNoticesPage();
   const loadMore = state.kind === "ready" ? state.loadMore : undefined;
   const submitNotice = state.kind === "ready" ? state.addNotice : undefined;
+  const moveNotice = state.kind === "ready" ? state.moveNotice : undefined;
   const [adding, setAdding] = useState<AddDraft>({ kind: "closed" });
 
   function open(status: NoticeStatus) {
@@ -160,7 +216,12 @@ export function NoticesPage() {
       <Masthead session={session} signedOut={state.kind === "signed-out"} />
       <main className="notice-sheet">
         <h1>Application Notices</h1>
-        <NoticesBody state={state} onLoadMore={loadMore} onAdd={submitNotice ? open : undefined} />
+        <NoticesBody
+          state={state}
+          onLoadMore={loadMore}
+          onAdd={submitNotice ? open : undefined}
+          onMove={moveNotice}
+        />
         {adding.kind === "open" && submitNotice ? (
           <AddNoticeDialog
             draft={adding}
@@ -178,10 +239,12 @@ function NoticesBody({
   state,
   onLoadMore,
   onAdd,
+  onMove,
 }: {
   state: NoticesPageState;
   onLoadMore?: (status: NoticeStatus) => void;
   onAdd?: (status: NoticeStatus) => void;
+  onMove?: (id: string, status: NoticeStatus) => void;
 }) {
   switch (state.kind) {
     case "loading":
@@ -205,32 +268,159 @@ function NoticesBody({
       return (
         <>
           {allEmpty ? <p className="notice-empty-copy">{EMPTY_COPY}</p> : null}
-          <div className="notice-board">
-            {state.lanes.map((lane) => (
-              <NoticeRow key={lane.status} lane={lane} onLoadMore={onLoadMore} onAdd={onAdd} />
-            ))}
-          </div>
+          <NoticesBoard lanes={state.lanes} onLoadMore={onLoadMore} onAdd={onAdd} onMove={onMove} />
         </>
       );
     }
   }
 }
 
+type CardDrag = {
+  notice: NoticeCard;
+  tone: NoticeTone;
+  from: NoticeStatus;
+  x: number;
+  y: number;
+  width: number;
+  over: NoticeStatus | null;
+};
+
+function NoticesBoard({
+  lanes,
+  onLoadMore,
+  onAdd,
+  onMove,
+}: {
+  lanes: readonly LaneState[];
+  onLoadMore?: (status: NoticeStatus) => void;
+  onAdd?: (status: NoticeStatus) => void;
+  onMove?: (id: string, status: NoticeStatus) => void;
+}) {
+  const drag = useCardDrag(onMove);
+
+  return (
+    <div className={drag.current === null ? "notice-board" : "notice-board is-dragging"}>
+      {lanes.map((lane) => (
+        <NoticeRow
+          key={lane.status}
+          lane={lane}
+          onLoadMore={onLoadMore}
+          onAdd={onAdd}
+          dropHere={drag.current !== null && drag.current.over === lane.status && drag.current.from !== lane.status}
+          draggingId={drag.current?.notice.id}
+          onCardPointerDown={onMove === undefined ? undefined : drag.begin}
+        />
+      ))}
+      {drag.current === null ? null : <DraggedCard drag={drag.current} />}
+    </div>
+  );
+}
+
+function useCardDrag(onMove?: (id: string, status: NoticeStatus) => void) {
+  const [current, setCurrent] = useState<CardDrag | null>(null);
+  const onMoveRef = useRef(onMove);
+  onMoveRef.current = onMove;
+
+  const begin = useCallback((event: ReactPointerEvent<HTMLElement>, notice: NoticeCard, status: NoticeStatus, tone: NoticeTone) => {
+    if (event.button !== 0) return;
+    const origin = event.currentTarget.getBoundingClientRect();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const offsetX = startX - origin.left;
+    const offsetY = startY - origin.top;
+    let moved = false;
+    let over: NoticeStatus | null = null;
+
+    const place = (clientX: number, clientY: number) => {
+      const hit = laneUnder(clientX, clientY);
+      if (hit !== null) over = hit;
+      setCurrent({
+        notice,
+        tone,
+        from: status,
+        x: clientX - offsetX,
+        y: clientY - offsetY,
+        width: origin.width,
+        over,
+      });
+    };
+
+    const follow = (ev: PointerEvent) => {
+      if (!moved && Math.hypot(ev.clientX - startX, ev.clientY - startY) < 6) return;
+      moved = true;
+      document.body.classList.add("is-notice-dragging");
+      place(ev.clientX, ev.clientY);
+    };
+
+    const finish = (ev: PointerEvent) => {
+      document.removeEventListener("pointermove", follow);
+      document.removeEventListener("pointerup", finish);
+      document.removeEventListener("pointercancel", finish);
+      document.body.classList.remove("is-notice-dragging");
+      if (moved) {
+        const released = laneUnder(ev.clientX, ev.clientY) ?? over;
+        if (released !== null && released !== status) onMoveRef.current?.(notice.id, released);
+      }
+      setCurrent(null);
+    };
+
+    document.addEventListener("pointermove", follow);
+    document.addEventListener("pointerup", finish);
+    document.addEventListener("pointercancel", finish);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      document.body.classList.remove("is-notice-dragging");
+    };
+  }, []);
+
+  return { current, begin };
+}
+
+function laneUnder(x: number, y: number): NoticeStatus | null {
+  const hit = document.elementFromPoint(x, y);
+  if (hit === null) return null;
+  return parseStatus(hit.closest("[data-notice-lane]")?.getAttribute("data-notice-lane"));
+}
+
+function DraggedCard({ drag }: { drag: CardDrag }) {
+  return (
+    <article
+      className={`notice-card notice-card--${drag.tone} notice-card-float`}
+      style={{ left: drag.x, top: drag.y, width: drag.width }}
+      aria-hidden="true"
+    >
+      <CardCopy notice={drag.notice} status={drag.from} />
+    </article>
+  );
+}
+
 function NoticeRow({
   lane,
   onLoadMore,
   onAdd,
+  dropHere,
+  draggingId,
+  onCardPointerDown,
 }: {
   lane: LaneState;
   onLoadMore?: (status: NoticeStatus) => void;
   onAdd?: (status: NoticeStatus) => void;
+  dropHere: boolean;
+  draggingId?: string;
+  onCardPointerDown?: (event: ReactPointerEvent<HTMLElement>, notice: NoticeCard, status: NoticeStatus, tone: NoticeTone) => void;
 }) {
   const headingId = `notice-lane-${lane.tone}`;
   const hasMore = lane.more && lane.phase === "idle";
   const sentinel = useNearEnd(hasMore, () => onLoadMore?.(lane.status));
 
   return (
-    <section className={`notice-lane notice-lane--${lane.tone}`} aria-labelledby={headingId}>
+    <section
+      className={`notice-lane notice-lane--${lane.tone}${dropHere ? " is-drop" : ""}`}
+      aria-labelledby={headingId}
+      data-notice-lane={lane.status}
+    >
       <div className="notice-lane-head">
         <h2 id={headingId}>
           {lane.status}{" "}
@@ -255,7 +445,17 @@ function NoticeRow({
       <ul className="notice-lane-track">
         {lane.notices.map((notice) => (
           <li key={notice.id}>
-            <NoticeCardView notice={notice} tone={lane.tone} status={lane.status} />
+            <NoticeCardView
+              notice={notice}
+              tone={lane.tone}
+              status={lane.status}
+              lifted={draggingId === notice.id}
+              onPointerDown={
+                onCardPointerDown === undefined
+                  ? undefined
+                  : (event) => onCardPointerDown(event, notice, lane.status, lane.tone)
+              }
+            />
           </li>
         ))}
         {lane.phase === "loading" ? (
@@ -278,18 +478,33 @@ function NoticeCardView({
   notice,
   tone,
   status,
+  lifted,
+  onPointerDown,
 }: {
   notice: NoticeCard;
   tone: NoticeTone;
   status: NoticeStatus;
+  lifted: boolean;
+  onPointerDown?: (event: ReactPointerEvent<HTMLElement>) => void;
 }) {
   return (
-    <article className={`notice-card notice-card--${tone}`}>
+    <article
+      className={`notice-card notice-card--${tone}${lifted ? " is-lifted" : ""}`}
+      onPointerDown={onPointerDown}
+    >
+      <CardCopy notice={notice} status={status} />
+    </article>
+  );
+}
+
+function CardCopy({ notice, status }: { notice: NoticeCard; status: NoticeStatus }) {
+  return (
+    <>
       <p className="notice-company">{notice.company}</p>
       <p className="notice-role">{notice.role ?? "Role not named"}</p>
       <p className="notice-status">{status}</p>
       <p className="notice-sent">Sent {formatSentAt(notice.sentAt)}</p>
-    </article>
+    </>
   );
 }
 

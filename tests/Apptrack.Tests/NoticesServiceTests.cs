@@ -306,6 +306,85 @@ public sealed class NoticesServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Moving_a_notice_changes_its_stage_and_keeps_recorded_order()
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Application Sent", At(3));
+        await SeedNotice(userId, "inbox-2", "Beta", null, "Application Sent", At(1));
+        await SeedNotice(userId, "inbox-3", "Northwind Freight", "Data Analyst", "Interviewing", At(2));
+        var acme = await _db.ApplicationNotices.SingleAsync(n => n.Company == "Acme");
+        var acmeId = acme.Id;
+        var sentAt = acme.SentAt;
+        var createdAt = acme.CreatedAt;
+        _db.ChangeTracker.Clear();
+
+        var moved = await NoticesEndpoint.MoveAsync(
+            MoveContext(userId, "Interviewing"), _session, _notices, acmeId, CancellationToken.None);
+
+        var ok = Assert.IsType<Ok<AddedNoticeDto>>(moved);
+        Assert.Equal("Interviewing", ok.Value!.Status);
+        Assert.Equal("Acme", ok.Value.Notice.Company);
+        Assert.Equal("Engineer", ok.Value.Notice.Role);
+        Assert.Equal(DateTime.SpecifyKind(sentAt, DateTimeKind.Utc), ok.Value.Notice.SentAt);
+
+        var interviewing = await _notices.GetNotices(userId, NoticeStatus.Interviewing, 12, 0, CancellationToken.None);
+        Assert.Equal(["Northwind Freight", "Acme"], interviewing!.Notices.Select(n => n.Company));
+        var sent = await _notices.GetNotices(userId, NoticeStatus.ApplicationSent, 12, 0, CancellationToken.None);
+        Assert.Equal(["Beta"], sent!.Notices.Select(n => n.Company));
+
+        var again = await NoticesEndpoint.MoveAsync(
+            MoveContext(userId, "Interviewing"), _session, _notices, acmeId, CancellationToken.None);
+        Assert.Equal(acmeId, Assert.IsType<Ok<AddedNoticeDto>>(again).Value!.Notice.Id);
+
+        var stored = await _db.ApplicationNotices.SingleAsync(n => n.Id == acmeId);
+        Assert.Equal(createdAt, stored.CreatedAt);
+        Assert.Equal(sentAt, stored.SentAt);
+        Assert.Equal("Interviewing", stored.Status);
+    }
+
+    [Fact]
+    public async Task Moving_an_unknown_stage_is_400_and_leaves_the_notice()
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Application Sent", At(1));
+        var acmeId = await _db.ApplicationNotices.Where(n => n.Company == "Acme").Select(n => n.Id).SingleAsync();
+        _db.ChangeTracker.Clear();
+
+        var result = await NoticesEndpoint.MoveAsync(
+            MoveContext(userId, "Offered"), _session, _notices, acmeId, CancellationToken.None);
+
+        Assert.IsType<BadRequest>(result);
+        Assert.Equal("Application Sent", await _db.ApplicationNotices.Where(n => n.Id == acmeId).Select(n => n.Status).SingleAsync());
+    }
+
+    [Fact]
+    public async Task Moving_a_notice_the_person_does_not_have_is_404()
+    {
+        var userId = await SeedUser("ada@example.com");
+        var otherId = await SeedUser("bea@example.com");
+        await SeedNotice(otherId, "inbox-1", "Acme", "Engineer", "Application Sent", At(1));
+        var acmeId = await _db.ApplicationNotices.Select(n => n.Id).SingleAsync();
+
+        var result = await NoticesEndpoint.MoveAsync(
+            MoveContext(userId, "Accepted"), _session, _notices, acmeId, CancellationToken.None);
+
+        Assert.IsType<NotFound>(result);
+        Assert.Equal("Application Sent", await _db.ApplicationNotices.Select(n => n.Status).SingleAsync());
+    }
+
+    [Fact]
+    public async Task Moving_for_a_missing_person_is_401_and_clears_the_session()
+    {
+        var ctx = MoveContext(Guid.CreateVersion7(), "Rejected");
+
+        var result = await NoticesEndpoint.MoveAsync(
+            ctx, _session, _notices, Guid.CreateVersion7(), CancellationToken.None);
+
+        Assert.IsType<UnauthorizedHttpResult>(result);
+        Assert.Contains("path=/api", Assert.Single(ctx.Response.Headers.SetCookie.ToArray())!);
+    }
+
+    [Fact]
     public async Task Add_for_a_missing_person_is_401_and_clears_the_session()
     {
         var ctx = HandContext(Guid.CreateVersion7(), Guid.CreateVersion7(), "Acme", null, "Rejected");
@@ -336,6 +415,15 @@ public sealed class NoticesServiceTests : IDisposable
     private Task<IResult> AddHand(Guid userId, Guid key, string company, string? role, string status) =>
         NoticesEndpoint.AddAsync(
             HandContext(userId, key, company, role, status), _session, _notices, CancellationToken.None);
+
+    private DefaultHttpContext MoveContext(Guid userId, string status)
+    {
+        var ctx = WithSession(userId);
+        var json = JsonSerializer.Serialize(new { status }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        ctx.Request.Body = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(json));
+        ctx.Request.ContentType = "application/json";
+        return ctx;
+    }
 
     private DefaultHttpContext HandContext(Guid userId, Guid key, string company, string? role, string status)
     {

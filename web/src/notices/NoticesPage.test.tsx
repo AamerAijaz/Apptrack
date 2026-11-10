@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { REMEMBERED_PROFILE_KEY } from "../auth/loadSessionProfile";
 import { Landing } from "../Landing";
 import { NoticesPage } from "./NoticesPage";
@@ -271,6 +271,139 @@ test("adding a notice from a stage opens a popup and puts the new card first", a
   expect(JSON.parse(posted[0]).key).toEqual(expect.any(String));
 });
 
+test("dropping a card on another stage moves it and reloads that stage in recorded order", async () => {
+  const acme = "0192f3a4-5b6c-7d8e-9f01-23456789ab01";
+  const beta = "0192f3a4-5b6c-7d8e-9f01-23456789ab02";
+  const northwind = "0192f3a4-5b6c-7d8e-9f01-23456789ab03";
+  const patches: { url: string; body: string }[] = [];
+  const laneGets: string[] = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    const url = String(input);
+    if (url === "/api/session") return Promise.resolve(sessionResponse());
+    if (init?.method === "PATCH") {
+      patches.push({ url, body: String(init.body) });
+      return Promise.resolve(
+        jsonResponse(200, {
+          status: "Interviewing",
+          notice: card({ id: acme, company: "Acme", role: "Engineer" }),
+        }),
+      );
+    }
+    if (url.startsWith("/api/notices/lane")) {
+      laneGets.push(url);
+      return Promise.resolve(
+        jsonResponse(200, {
+          email: "ada@gmail.com",
+          status: "Interviewing",
+          limit: 2,
+          notices: [
+            card({ id: northwind, company: "Northwind Freight", role: null }),
+            card({ id: acme, company: "Acme", role: "Engineer" }),
+          ],
+        }),
+      );
+    }
+    return Promise.resolve(
+      jsonResponse(
+        200,
+        board({
+          0: [
+            card({ id: beta, company: "Beta", role: null }),
+            card({ id: acme, company: "Acme", role: "Engineer" }),
+          ],
+          1: [card({ id: northwind, company: "Northwind Freight", role: null })],
+        }),
+      ),
+    );
+  });
+
+  render(<NoticesPage />);
+  const sent = await screen.findByRole("region", { name: "Application Sent 2 notices" });
+  const interviewing = screen.getByRole("region", { name: "Interviewing 1 notice" });
+  const acmeCard = within(sent).getByText("Acme").closest("article");
+  expect(acmeCard).not.toBeNull();
+
+  releaseCardOn(acmeCard!, sent);
+  expect(patches).toHaveLength(0);
+
+  releaseCardOn(acmeCard!, interviewing, false);
+
+  expect(await within(interviewing).findByText("Acme")).toBeInTheDocument();
+  expect(within(interviewing).getAllByRole("article").map((article) => article.textContent)).toEqual([
+    expect.stringContaining("Northwind Freight"),
+    expect.stringContaining("Acme"),
+  ]);
+  expect(within(sent).queryByText("Acme")).not.toBeInTheDocument();
+  expect(within(sent).getByText("Beta")).toBeInTheDocument();
+  expect(patches).toEqual([{ url: `/api/notices/${acme}`, body: JSON.stringify({ status: "Interviewing" }) }]);
+  expect(laneGets).toEqual(["/api/notices/lane?application_status=Interviewing&limit=2&offset=0"]);
+});
+
+test("a later drop wins when an earlier reload is still in flight", async () => {
+  const acme = "0192f3a4-5b6c-7d8e-9f01-23456789ab01";
+  let releaseInterviewing: () => void = () => {};
+  const interviewingGate = new Promise<void>((resolve) => {
+    releaseInterviewing = resolve;
+  });
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/session") return sessionResponse();
+    if (init?.method === "PATCH") {
+      const status = JSON.parse(String(init.body)).status as string;
+      return jsonResponse(200, { status, notice: card({ id: acme, company: "Acme" }) });
+    }
+    if (url.startsWith("/api/notices/lane")) {
+      const status = new URL(url, "http://localhost").searchParams.get("application_status");
+      if (status === "Interviewing") await interviewingGate;
+      return jsonResponse(200, {
+        email: "ada@gmail.com",
+        status,
+        limit: 1,
+        notices: [card({ id: acme, company: "Acme" })],
+      });
+    }
+    return jsonResponse(200, board({ 0: [card({ id: acme, company: "Acme" })] }));
+  });
+
+  render(<NoticesPage />);
+  const sent = await screen.findByRole("region", { name: "Application Sent 1 notice" });
+  const interviewing = screen.getByRole("region", { name: "Interviewing 0 notices" });
+  const accepted = screen.getByRole("region", { name: "Accepted 0 notices" });
+  const acmeCard = within(sent).getByText("Acme").closest("article");
+
+  releaseCardOn(acmeCard!, interviewing);
+  releaseCardOn(acmeCard!, accepted);
+  releaseInterviewing();
+
+  expect(await within(accepted).findByText("Acme")).toBeInTheDocument();
+  expect(within(interviewing).queryByText("Acme")).not.toBeInTheDocument();
+  expect(within(sent).queryByText("Acme")).not.toBeInTheDocument();
+});
+
+test("a failed move leaves the card in its stage", async () => {
+  let patches = 0;
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    if (String(input) === "/api/session") return Promise.resolve(sessionResponse());
+    if (init?.method === "PATCH") {
+      patches += 1;
+      return Promise.resolve(new Response(null, { status: 500 }));
+    }
+    return Promise.resolve(
+      jsonResponse(200, board({ 0: [card({ company: "Acme" })] })),
+    );
+  });
+
+  render(<NoticesPage />);
+  const sent = await screen.findByRole("region", { name: "Application Sent 1 notice" });
+  const rejected = screen.getByRole("region", { name: "Rejected 0 notices" });
+  const acmeCard = within(sent).getByText("Acme").closest("article");
+  releaseCardOn(acmeCard!, rejected);
+
+  await waitFor(() => expect(patches).toBe(1));
+  expect(within(sent).getByText("Acme")).toBeInTheDocument();
+  expect(within(rejected).queryByText("Acme")).not.toBeInTheDocument();
+});
+
 test("a rejected notice stays in the popup", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
     if (String(input) === "/api/session") return Promise.resolve(sessionResponse());
@@ -333,6 +466,18 @@ function card(overrides: Record<string, unknown> = {}) {
     sentAt: "2026-11-03T14:22:05Z",
     ...overrides,
   };
+}
+
+function releaseCardOn(card: Element, lane: Element, releaseOnLane = true) {
+  const point = (type: string, x: number, y: number) =>
+    new MouseEvent(type, { bubbles: true, clientX: x, clientY: y, button: 0 });
+  document.elementFromPoint = () => lane;
+  act(() => {
+    card.dispatchEvent(point("pointerdown", 4, 4));
+    card.dispatchEvent(point("pointermove", 40, 16));
+    if (!releaseOnLane) document.elementFromPoint = () => null;
+    card.dispatchEvent(point("pointerup", 8, 8));
+  });
 }
 
 function mockNotices(body: unknown) {
