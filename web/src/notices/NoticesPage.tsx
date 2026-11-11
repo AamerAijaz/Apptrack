@@ -185,10 +185,14 @@ export function useNoticesPage(): NoticesPageState & {
                     ? { ...lane, notices: lane.notices.filter((notice) => notice.id !== id) }
                     : lane;
                 }
+                const inPage = new Set(page.notices.map((notice) => notice.id));
                 return {
                   ...lane,
                   phase: "idle",
-                  notices: page.notices,
+                  notices: [
+                    ...page.notices,
+                    ...lane.notices.filter((notice) => !inPage.has(notice.id)),
+                  ],
                   limit: page.limit,
                   more: page.notices.length === page.limit,
                 };
@@ -543,9 +547,9 @@ function NoticeCardView({
       }
     >
       {onPointerDown === undefined ? null : (
-        <button type="button" className="notice-drag" aria-label={`Move ${notice.company}`}>
-          Move
-        </button>
+        <span className="notice-drag" aria-hidden="true">
+          Drag
+        </span>
       )}
       <CardCopy notice={notice} status={status} />
     </article>

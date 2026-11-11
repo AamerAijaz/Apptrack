@@ -380,6 +380,70 @@ test("a later drop wins when an earlier reload is still in flight", async () => 
   expect(within(sent).queryByText("Acme")).not.toBeInTheDocument();
 });
 
+test("a slower lane reload keeps a notice another move already placed", async () => {
+  const acme = "0192f3a4-5b6c-7d8e-9f01-23456789ab01";
+  const beta = "0192f3a4-5b6c-7d8e-9f01-23456789ab02";
+  let interviewingLoads = 0;
+  let releaseFirst: () => void = () => {};
+  const firstLane = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/session") return sessionResponse();
+    if (init?.method === "PATCH") {
+      const id = url.split("/").at(-1);
+      const status = JSON.parse(String(init.body)).status as string;
+      const company = id === beta ? "Beta" : "Acme";
+      return jsonResponse(200, { status, notice: card({ id, company }) });
+    }
+    if (url.startsWith("/api/notices/lane")) {
+      const status = new URL(url, "http://localhost").searchParams.get("application_status");
+      if (status === "Interviewing") {
+        interviewingLoads += 1;
+        if (interviewingLoads === 1) {
+          await firstLane;
+          return jsonResponse(200, {
+            email: "ada@gmail.com",
+            status,
+            limit: 1,
+            notices: [card({ id: acme, company: "Acme" })],
+          });
+        }
+        return jsonResponse(200, {
+          email: "ada@gmail.com",
+          status,
+          limit: 1,
+          notices: [card({ id: beta, company: "Beta" })],
+        });
+      }
+    }
+    return jsonResponse(
+      200,
+      board({
+        0: [card({ id: acme, company: "Acme" }), card({ id: beta, company: "Beta" })],
+      }),
+    );
+  });
+
+  render(<NoticesPage />);
+  const sent = await screen.findByRole("region", { name: "Application Sent 2 notices" });
+  const interviewing = screen.getByRole("region", { name: "Interviewing 0 notices" });
+  const acmeCard = within(sent).getByText("Acme").closest("article");
+  const betaCard = within(sent).getByText("Beta").closest("article");
+
+  releaseCardOn(acmeCard!, interviewing);
+  await waitFor(() => expect(interviewingLoads).toBe(1));
+  releaseCardOn(betaCard!, interviewing);
+
+  expect(await within(interviewing).findByText("Beta")).toBeInTheDocument();
+  releaseFirst();
+  await waitFor(() => expect(within(interviewing).getByText("Acme")).toBeInTheDocument());
+  expect(within(interviewing).getByText("Beta")).toBeInTheDocument();
+  expect(within(sent).queryByText("Acme")).not.toBeInTheDocument();
+  expect(within(sent).queryByText("Beta")).not.toBeInTheDocument();
+});
+
 test("a failed move leaves the card in its stage", async () => {
   let patches = 0;
   vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
