@@ -10,6 +10,20 @@ afterEach(() => {
   window.history.replaceState(null, "", "/");
 });
 
+test("the example is an application notice", () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(() => new Promise(() => {}));
+
+  render(<Landing />);
+
+  const example = screen.getByRole("complementary", { name: "Example Job Application" });
+  expect(example).toHaveTextContent("Northwind Freight");
+  expect(example).toHaveTextContent("Data Analyst");
+  expect(example).toHaveTextContent("Application Sent");
+  expect(example).toHaveTextContent("Sent 4 Mar 2026, 09:15 UTC");
+  expect(example.querySelector(".notice-card--sent")).not.toBeNull();
+  expect(example.querySelector(".notice-drag")).toBeNull();
+});
+
 test("holds the masthead until the session is known", async () => {
   let resolveFetch: ((response: Response) => void) | undefined;
   vi.spyOn(globalThis, "fetch").mockImplementation(
@@ -29,7 +43,7 @@ test("holds the masthead until the session is known", async () => {
 
   const photo = await screen.findByRole("img", { name: "ada@gmail.com" });
   expect(photo).toHaveAttribute("src", PICTURE);
-  expect(photo.closest("a")).toHaveAttribute("href", "/notices");
+  expect(photo.closest("button")).toHaveAttribute("aria-haspopup", "menu");
   expect(screen.getByRole("link", { name: "Notices" })).toHaveAttribute("href", "/notices");
   expect(screen.queryByRole("link", { name: /connect/i })).not.toBeInTheDocument();
   expect(screen.queryByText("Read-only Gmail access. AppTrack never sends mail.")).not.toBeInTheDocument();
@@ -109,8 +123,8 @@ test("a session without a picture shows the email's first letter and hides Conne
 
   render(<Landing />);
 
-  const mark = await screen.findByRole("link", { name: "aamerasim45@gmail.com" });
-  expect(mark).toHaveAttribute("href", "/notices");
+  const mark = await screen.findByRole("button", { name: "aamerasim45@gmail.com" });
+  expect(mark).toHaveAttribute("aria-haspopup", "menu");
   expect(mark).toHaveTextContent("A");
   expect(screen.getByRole("link", { name: "Notices" })).toHaveAttribute("href", "/notices");
   expect(screen.queryByText("aamerasim45@gmail.com")).not.toBeInTheDocument();
@@ -126,7 +140,7 @@ test("an http picture is not used as the image", async () => {
 
   render(<Landing />);
 
-  expect(await screen.findByRole("link", { name: "ada@gmail.com" })).toHaveTextContent("A");
+  expect(await screen.findByRole("button", { name: "ada@gmail.com" })).toHaveTextContent("A");
   expect(screen.queryByRole("img")).not.toBeInTheDocument();
 });
 
@@ -140,8 +154,67 @@ test("a picture that fails to load falls back to the email's first letter", asyn
   const photo = await screen.findByRole("img", { name: "ada@gmail.com" });
   fireEvent.error(photo);
 
-  expect(screen.getByRole("link", { name: "ada@gmail.com" })).toHaveTextContent("A");
+  expect(screen.getByRole("button", { name: "ada@gmail.com" })).toHaveTextContent("A");
   expect(screen.queryByRole("img")).not.toBeInTheDocument();
+});
+
+test("signing out clears the remembered profile and shows Connect", async () => {
+  localStorage.setItem(
+    REMEMBERED_PROFILE_KEY,
+    JSON.stringify({ email: "ada@gmail.com", picture: PICTURE, savedAt: Date.now() }),
+  );
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+
+  render(<Landing />);
+
+  fireEvent.click(screen.getByRole("button", { name: "ada@gmail.com" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Sign out" }));
+
+  expect(await screen.findByRole("link", { name: "Connect to Gmail" })).toBeInTheDocument();
+  expect(screen.queryByRole("img")).not.toBeInTheDocument();
+  expect(localStorage.getItem(REMEMBERED_PROFILE_KEY)).toBeNull();
+  expect(fetchSpy).toHaveBeenCalledWith(
+    "/api/session/sign-out",
+    expect.objectContaining({ method: "POST" }),
+  );
+});
+
+test("a failed sign out keeps the profile and shows the error", async () => {
+  localStorage.setItem(
+    REMEMBERED_PROFILE_KEY,
+    JSON.stringify({ email: "ada@gmail.com", picture: PICTURE, savedAt: Date.now() }),
+  );
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 500 }));
+
+  render(<Landing />);
+
+  fireEvent.click(screen.getByRole("button", { name: "ada@gmail.com" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Sign out" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't sign out. Try again.");
+  expect(screen.getByRole("img", { name: "ada@gmail.com" })).toBeInTheDocument();
+  expect(localStorage.getItem(REMEMBERED_PROFILE_KEY)).not.toBeNull();
+  expect(screen.queryByRole("link", { name: "Connect to Gmail" })).not.toBeInTheDocument();
+});
+
+test("Escape closes the profile menu and returns focus to the profile", async () => {
+  localStorage.setItem(
+    REMEMBERED_PROFILE_KEY,
+    JSON.stringify({ email: "ada@gmail.com", picture: PICTURE, savedAt: Date.now() }),
+  );
+
+  render(<Landing />);
+
+  const profile = screen.getByRole("button", { name: "ada@gmail.com" });
+  fireEvent.click(profile, { detail: 0 });
+
+  const signOut = await screen.findByRole("menuitem", { name: "Sign out" });
+  expect(signOut).toHaveFocus();
+
+  fireEvent.keyDown(document, { key: "Escape" });
+
+  expect(screen.queryByRole("menuitem", { name: "Sign out" })).not.toBeInTheDocument();
+  expect(profile).toHaveFocus();
 });
 
 test("the connect failure stays on the signed-out landing page", async () => {

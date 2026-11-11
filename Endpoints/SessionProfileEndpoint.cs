@@ -8,7 +8,14 @@ public static class SessionProfileEndpoint
     public static IEndpointRouteBuilder MapSessionProfile(this IEndpointRouteBuilder app)
     {
         app.MapGet("/api/session", GetAsync);
+        app.MapPost("/api/session/sign-out", SignOutAsync);
         return app;
+    }
+
+    public static Task<IResult> SignOutAsync(HttpContext ctx, SessionCookie session)
+    {
+        session.Clear(ctx.Response);
+        return Task.FromResult<IResult>(Results.NoContent());
     }
 
     public static async Task<IResult> GetAsync(HttpContext ctx, SessionCookie session, SessionProfileService profiles, CancellationToken ct)
