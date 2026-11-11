@@ -478,10 +478,28 @@ a:focus-visible {
     inset 0 1px 0 rgba(255, 255, 255, 0.92),
     inset 0 -10px 18px rgba(21, 33, 43, 0.03),
     0 12px 28px rgba(21, 33, 43, 0.07);
+  position: relative;
   cursor: grab;
-  touch-action: none;
+  touch-action: pan-x;
   user-select: none;
   transition: transform 160ms ease, opacity 160ms ease, box-shadow 160ms ease;
+}
+
+.notice-drag {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  min-height: 28px;
+  padding: 0 8px;
+  border: 1px solid rgba(21, 33, 43, 0.16);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: grab;
+  touch-action: none;
 }
 
 .notice-card.is-lifted {

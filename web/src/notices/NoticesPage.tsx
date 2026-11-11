@@ -52,7 +52,7 @@ export function useNoticesPage(): NoticesPageState & {
   const [state, setState] = useState<NoticesPageState>({ kind: "loading" });
   const stateRef = useRef(state);
   const abortRef = useRef<AbortController | null>(null);
-  const moveEpoch = useRef(0);
+  const latestMove = useRef(new Map<string, number>());
 
   useEffect(() => {
     stateRef.current = state;
@@ -145,41 +145,60 @@ export function useNoticesPage(): NoticesPageState & {
     if (source === undefined || destination === undefined || source.status === status) return;
 
     const limit = Math.min(50, destination.notices.length + 1);
-    const epoch = moveEpoch.current + 1;
-    moveEpoch.current = epoch;
+    const epoch = (latestMove.current.get(id) ?? 0) + 1;
+    latestMove.current.set(id, epoch);
+    const currentMove = () => latestMove.current.get(id) === epoch;
     patchNotice(id, status, abortRef.current?.signal).then(
       async (result) => {
-        if (moveEpoch.current !== epoch) return;
+        if (!currentMove()) return;
         if (result.kind === "signed-out") {
           setState({ kind: "signed-out" });
           return;
         }
         if (result.kind !== "stored" || result.status !== status) return;
 
-        const page = await getNotices(status, limit, 0, abortRef.current?.signal);
-        if (moveEpoch.current !== epoch) return;
-        setState((latest) => {
-          if (latest.kind !== "ready") return latest;
-          if (page.kind === "signed-out") return { kind: "signed-out" };
-          if (page.kind !== "ready" || page.status !== status) return latest;
-          return {
-            ...latest,
-            lanes: latest.lanes.map((lane) => {
-              if (lane.status !== status) {
-                return lane.notices.some((notice) => notice.id === id)
-                  ? { ...lane, notices: lane.notices.filter((notice) => notice.id !== id) }
-                  : lane;
-              }
-              return {
-                ...lane,
-                phase: "idle",
-                notices: page.notices,
-                limit: page.limit,
-                more: page.notices.length === page.limit,
-              };
-            }),
-          };
-        });
+        const showStored = () => {
+          setState((latest) => {
+            if (latest.kind !== "ready") return latest;
+            return placeMovedCard(latest, id, status, result.notice);
+          });
+        };
+
+        try {
+          const page = await getNotices(status, limit, 0, abortRef.current?.signal);
+          if (!currentMove()) return;
+          if (page.kind === "signed-out") {
+            setState({ kind: "signed-out" });
+            return;
+          }
+          if (page.kind !== "ready" || page.status !== status) {
+            showStored();
+            return;
+          }
+          setState((latest) => {
+            if (latest.kind !== "ready") return latest;
+            return {
+              ...latest,
+              lanes: latest.lanes.map((lane) => {
+                if (lane.status !== status) {
+                  return lane.notices.some((notice) => notice.id === id)
+                    ? { ...lane, notices: lane.notices.filter((notice) => notice.id !== id) }
+                    : lane;
+                }
+                return {
+                  ...lane,
+                  phase: "idle",
+                  notices: page.notices,
+                  limit: page.limit,
+                  more: page.notices.length === page.limit,
+                };
+              }),
+            };
+          });
+        } catch (error: unknown) {
+          if (isAbortError(error) || !currentMove()) return;
+          showStored();
+        }
       },
       (error: unknown) => {
         if (isAbortError(error)) return;
@@ -190,6 +209,22 @@ export function useNoticesPage(): NoticesPageState & {
   return state.kind === "ready"
     ? { ...state, loadMore, addNotice: submitNotice, moveNotice: relocate }
     : state;
+}
+
+function placeMovedCard(
+  state: Extract<NoticesPageState, { kind: "ready" }>,
+  id: string,
+  status: NoticeStatus,
+  notice: NoticeCard,
+): Extract<NoticesPageState, { kind: "ready" }> {
+  return {
+    ...state,
+    lanes: state.lanes.map((lane) => {
+      const without = lane.notices.filter((item) => item.id !== id);
+      if (lane.status !== status) return { ...lane, notices: without };
+      return { ...lane, phase: "idle", notices: [notice, ...without] };
+    }),
+  };
 }
 
 export function NoticesPage() {
@@ -320,9 +355,10 @@ function useCardDrag(onMove?: (id: string, status: NoticeStatus) => void) {
   const [current, setCurrent] = useState<CardDrag | null>(null);
   const onMoveRef = useRef(onMove);
   onMoveRef.current = onMove;
+  const teardownRef = useRef<(() => void) | null>(null);
 
   const begin = useCallback((event: ReactPointerEvent<HTMLElement>, notice: NoticeCard, status: NoticeStatus, tone: NoticeTone) => {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || teardownRef.current !== null) return;
     const origin = event.currentTarget.getBoundingClientRect();
     const startX = event.clientX;
     const startY = event.clientY;
@@ -332,8 +368,7 @@ function useCardDrag(onMove?: (id: string, status: NoticeStatus) => void) {
     let over: NoticeStatus | null = null;
 
     const place = (clientX: number, clientY: number) => {
-      const hit = laneUnder(clientX, clientY);
-      if (hit !== null) over = hit;
+      over = laneUnder(clientX, clientY);
       setCurrent({
         notice,
         tone,
@@ -345,6 +380,14 @@ function useCardDrag(onMove?: (id: string, status: NoticeStatus) => void) {
       });
     };
 
+    const teardown = () => {
+      document.removeEventListener("pointermove", follow);
+      document.removeEventListener("pointerup", finish);
+      document.removeEventListener("pointercancel", finish);
+      document.body.classList.remove("is-notice-dragging");
+      teardownRef.current = null;
+    };
+
     const follow = (ev: PointerEvent) => {
       if (!moved && Math.hypot(ev.clientX - startX, ev.clientY - startY) < 6) return;
       moved = true;
@@ -353,17 +396,15 @@ function useCardDrag(onMove?: (id: string, status: NoticeStatus) => void) {
     };
 
     const finish = (ev: PointerEvent) => {
-      document.removeEventListener("pointermove", follow);
-      document.removeEventListener("pointerup", finish);
-      document.removeEventListener("pointercancel", finish);
-      document.body.classList.remove("is-notice-dragging");
-      if (moved) {
-        const released = laneUnder(ev.clientX, ev.clientY) ?? over;
+      teardown();
+      if (moved && ev.type === "pointerup") {
+        const released = laneUnder(ev.clientX, ev.clientY);
         if (released !== null && released !== status) onMoveRef.current?.(notice.id, released);
       }
       setCurrent(null);
     };
 
+    teardownRef.current = teardown;
     document.addEventListener("pointermove", follow);
     document.addEventListener("pointerup", finish);
     document.addEventListener("pointercancel", finish);
@@ -371,7 +412,7 @@ function useCardDrag(onMove?: (id: string, status: NoticeStatus) => void) {
 
   useEffect(() => {
     return () => {
-      document.body.classList.remove("is-notice-dragging");
+      teardownRef.current?.();
     };
   }, []);
 
@@ -490,8 +531,22 @@ function NoticeCardView({
   return (
     <article
       className={`notice-card notice-card--${tone}${lifted ? " is-lifted" : ""}`}
-      onPointerDown={onPointerDown}
+      onPointerDown={
+        onPointerDown === undefined
+          ? undefined
+          : (event) => {
+              const fromHandle =
+                event.target instanceof Element && event.target.closest(".notice-drag") !== null;
+              if (event.pointerType === "touch" && !fromHandle) return;
+              onPointerDown(event);
+            }
+      }
     >
+      {onPointerDown === undefined ? null : (
+        <button type="button" className="notice-drag" aria-label={`Move ${notice.company}`}>
+          Move
+        </button>
+      )}
       <CardCopy notice={notice} status={status} />
     </article>
   );

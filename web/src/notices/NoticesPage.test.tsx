@@ -326,7 +326,7 @@ test("dropping a card on another stage moves it and reloads that stage in record
   releaseCardOn(acmeCard!, sent);
   expect(patches).toHaveLength(0);
 
-  releaseCardOn(acmeCard!, interviewing, false);
+  releaseCardOn(acmeCard!, interviewing);
 
   expect(await within(interviewing).findByText("Acme")).toBeInTheDocument();
   expect(within(interviewing).getAllByRole("article").map((article) => article.textContent)).toEqual([
@@ -468,15 +468,14 @@ function card(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function releaseCardOn(card: Element, lane: Element, releaseOnLane = true) {
+function releaseCardOn(card: Element, lane: Element) {
   const point = (type: string, x: number, y: number) =>
     new MouseEvent(type, { bubbles: true, clientX: x, clientY: y, button: 0 });
   document.elementFromPoint = () => lane;
   act(() => {
     card.dispatchEvent(point("pointerdown", 4, 4));
     card.dispatchEvent(point("pointermove", 40, 16));
-    if (!releaseOnLane) document.elementFromPoint = () => null;
-    card.dispatchEvent(point("pointerup", 8, 8));
+    card.dispatchEvent(point("pointerup", 40, 16));
   });
 }
 
