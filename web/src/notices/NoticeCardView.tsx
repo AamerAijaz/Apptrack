@@ -31,6 +31,11 @@ export function NoticeCardView({
             }
       }
     >
+      {onPointerDown === undefined ? null : (
+        <span className="notice-drag" aria-hidden="true">
+          Drag
+        </span>
+      )}
       <CardCopy notice={notice} status={status} />
     </article>
   );

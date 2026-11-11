@@ -47,19 +47,15 @@ export function useMastheadSession(): {
   }, []);
 
   async function signOut(): Promise<boolean> {
-    leftRef.current = true;
-    loadRef.current?.abort();
     let response: Response;
     try {
       response = await fetch(SIGN_OUT_API, { method: "POST" });
     } catch {
-      leftRef.current = false;
       return false;
     }
-    if (!response.ok) {
-      leftRef.current = false;
-      return false;
-    }
+    if (!response.ok) return false;
+    leftRef.current = true;
+    loadRef.current?.abort();
     forgetProfile();
     setState({ kind: "signed-out" });
     return true;
