@@ -59,6 +59,23 @@ export type HandDraft = {
   readonly key: string;
 };
 
+export async function moveNotice(
+  id: string,
+  status: NoticeStatus,
+  signal?: AbortSignal,
+): Promise<AddNoticeResult> {
+  const response = await postJson(`${BOARD_API}/${id}`, { status }, signal, "PATCH");
+  if (response.kind === "signed-out" || response.kind === "rejected" || response.kind === "retired" || response.kind === "failed") {
+    return response;
+  }
+
+  if (!isRecord(response.body)) return { kind: "failed" };
+  const storedStatus = parseStatus(response.body.status);
+  const notice = parseCard(response.body.notice);
+  if (storedStatus === null || notice === null) return { kind: "failed" };
+  return { kind: "stored", status: storedStatus, notice };
+}
+
 export async function addNotice(draft: HandDraft, signal?: AbortSignal): Promise<AddNoticeResult> {
   const response = await postJson(BOARD_API, draft, signal);
   if (response.kind === "signed-out" || response.kind === "rejected" || response.kind === "retired" || response.kind === "failed") {
@@ -95,6 +112,7 @@ async function postJson(
   url: string,
   json: unknown,
   signal?: AbortSignal,
+  method: "POST" | "PATCH" = "POST",
 ): Promise<
   | { kind: "ok"; body: unknown }
   | { kind: "signed-out" }
@@ -105,7 +123,7 @@ async function postJson(
   let response: Response;
   try {
     response = await fetch(url, {
-      method: "POST",
+      method,
       headers: { Accept: "application/json", "Content-Type": "application/json" },
       body: JSON.stringify(json),
       signal,

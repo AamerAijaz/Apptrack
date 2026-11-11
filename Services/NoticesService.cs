@@ -217,6 +217,20 @@ public abstract class IncomingNotice
         ByMailbox.FromExtraction(messageId, extracted, content);
 }
 
+public abstract record MoveNoticeResult
+{
+    private MoveNoticeResult() { }
+
+    /// <summary>The cookie user does not exist or is soft-deleted.</summary>
+    public sealed record MissingPerson : MoveNoticeResult;
+
+    /// <summary>No live notice with this id belongs to the person.</summary>
+    public sealed record NotFound : MoveNoticeResult;
+
+    /// <summary>The stage is now the requested one. A repeat move returns the same card.</summary>
+    public sealed record Stored(NoticeCard Card, NoticeStatus Status) : MoveNoticeResult;
+}
+
 public abstract record AddNoticeResult
 {
     private AddNoticeResult() { }
@@ -308,6 +322,30 @@ public sealed class NoticesService(AppDbContext db, TimeProvider time)
         var status = NoticeStatus.FromLabel(stored.Status)
             ?? throw new InvalidOperationException("A stored notice has a status the board does not know.");
         return new AddNoticeResult.Stored(ToCard(stored), status);
+    }
+
+    /// <summary>
+    /// Moves one live notice to a stage. Recorded time and Sent at are unchanged.
+    /// The same stage returns the stored card without writing a new row.
+    /// </summary>
+    public async Task<MoveNoticeResult> Move(Guid userId, Guid noticeId, NoticeStatus status, CancellationToken ct)
+    {
+        var person = await db.Users.AnyAsync(u => u.Id == userId, ct);
+        if (!person)
+            return new MoveNoticeResult.MissingPerson();
+
+        var notice = await db.ApplicationNotices
+            .SingleOrDefaultAsync(n => n.Id == noticeId && n.UserId == userId, ct);
+        if (notice is null)
+            return new MoveNoticeResult.NotFound();
+
+        if (notice.Status != status.Label)
+        {
+            notice.MoveTo(status);
+            await db.SaveChangesAsync(ct);
+        }
+
+        return new MoveNoticeResult.Stored(ToCard(notice), status);
     }
 
     private async Task<Entities.ApplicationNotice> InsertOnce(

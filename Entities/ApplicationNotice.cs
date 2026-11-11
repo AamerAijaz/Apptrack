@@ -41,6 +41,9 @@ public sealed class ApplicationNotice
         CreatedAt = createdAt.Value;
     }
 
+    /// <summary>Changes the stage. Recorded time and Sent at stay as they are.</summary>
+    public void MoveTo(NoticeStatus status) => Status = status.Label;
+
     public Guid Id { get; private set; }
     public string MessageId { get; private set; } = null!;
     public Guid UserId { get; private set; }
