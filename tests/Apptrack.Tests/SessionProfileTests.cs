@@ -38,6 +38,37 @@ public sealed class SessionProfileTests : IDisposable
     }
 
     [Fact]
+    public async Task Sign_out_clears_a_live_session_and_does_not_read_the_person()
+    {
+        var userId = await SeedUser("ada@example.com");
+        var ctx = WithSession(userId);
+        _commands.Texts.Clear();
+
+        var result = await SessionProfileEndpoint.SignOutAsync(ctx, _session);
+
+        Assert.IsType<NoContent>(result);
+        var header = Assert.Single(ctx.Response.Headers.SetCookie.ToArray())!;
+        Assert.StartsWith("apptrack_session=;", header);
+        Assert.Contains("path=/api", header);
+        Assert.Empty(_commands.Texts);
+    }
+
+    [Fact]
+    public async Task Sign_out_without_a_cookie_still_clears_the_session()
+    {
+        var ctx = new DefaultHttpContext();
+        _commands.Texts.Clear();
+
+        var result = await SessionProfileEndpoint.SignOutAsync(ctx, _session);
+
+        Assert.IsType<NoContent>(result);
+        var header = Assert.Single(ctx.Response.Headers.SetCookie.ToArray())!;
+        Assert.StartsWith("apptrack_session=;", header);
+        Assert.Contains("path=/api", header);
+        Assert.Empty(_commands.Texts);
+    }
+
+    [Fact]
     public async Task Endpoint_without_a_session_is_401_and_leaves_cookies_alone()
     {
         var ctx = new DefaultHttpContext();

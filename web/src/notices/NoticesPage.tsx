@@ -13,12 +13,11 @@ import {
   type NoticeCard,
   type NoticeLane,
 } from "./loadNotices";
+import { CardCopy, NoticeCardView } from "./NoticeCardView";
 import { parseStatus, type NoticeStatus, type NoticeTone } from "./statuses";
 
 const EMPTY_COPY =
   "No Application Notices yet. AppTrack reads new mail from now on. Notices appear here as companies write to you.";
-
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
 
 type LanePhase = "idle" | "loading" | "failed";
 
@@ -232,11 +231,19 @@ function placeMovedCard(
 }
 
 export function NoticesPage() {
-  const session = useMastheadSession();
+  const { session, signOut } = useMastheadSession();
   const state = useNoticesPage();
-  const loadMore = state.kind === "ready" ? state.loadMore : undefined;
-  const submitNotice = state.kind === "ready" ? state.addNotice : undefined;
-  const moveNotice = state.kind === "ready" ? state.moveNotice : undefined;
+  const [signedOutHere, setSignedOutHere] = useState(false);
+  const page = signedOutHere ? { kind: "signed-out" as const } : state;
+
+  async function leave() {
+    const ok = await signOut();
+    if (ok) setSignedOutHere(true);
+    return ok;
+  }
+  const loadMore = page.kind === "ready" ? page.loadMore : undefined;
+  const submitNotice = page.kind === "ready" ? page.addNotice : undefined;
+  const moveNotice = page.kind === "ready" ? page.moveNotice : undefined;
   const [adding, setAdding] = useState<AddDraft>({ kind: "closed" });
 
   function open(status: NoticeStatus) {
@@ -252,11 +259,11 @@ export function NoticesPage() {
 
   return (
     <>
-      <Masthead session={session} signedOut={state.kind === "signed-out"} />
+      <Masthead session={session} signedOut={page.kind === "signed-out"} onSignOut={leave} />
       <main className="notice-sheet">
         <h1>Application Notices</h1>
         <NoticesBody
-          state={state}
+          state={page}
           onLoadMore={loadMore}
           onAdd={submitNotice ? open : undefined}
           onMove={moveNotice}
@@ -483,7 +490,7 @@ function NoticeRow({
             aria-label={`Add notice to ${lane.status}`}
             onClick={() => onAdd(lane.status)}
           >
-            Add notice
+            Add
           </button>
         ) : null}
       </div>
@@ -516,54 +523,6 @@ function NoticeRow({
         {hasMore ? <li ref={sentinel} className="notice-sentinel" aria-hidden="true" /> : null}
       </ul>
     </section>
-  );
-}
-
-function NoticeCardView({
-  notice,
-  tone,
-  status,
-  lifted,
-  onPointerDown,
-}: {
-  notice: NoticeCard;
-  tone: NoticeTone;
-  status: NoticeStatus;
-  lifted: boolean;
-  onPointerDown?: (event: ReactPointerEvent<HTMLElement>) => void;
-}) {
-  return (
-    <article
-      className={`notice-card notice-card--${tone}${lifted ? " is-lifted" : ""}`}
-      onPointerDown={
-        onPointerDown === undefined
-          ? undefined
-          : (event) => {
-              const fromHandle =
-                event.target instanceof Element && event.target.closest(".notice-drag") !== null;
-              if (event.pointerType === "touch" && !fromHandle) return;
-              onPointerDown(event);
-            }
-      }
-    >
-      {onPointerDown === undefined ? null : (
-        <span className="notice-drag" aria-hidden="true">
-          Drag
-        </span>
-      )}
-      <CardCopy notice={notice} status={status} />
-    </article>
-  );
-}
-
-function CardCopy({ notice, status }: { notice: NoticeCard; status: NoticeStatus }) {
-  return (
-    <>
-      <p className="notice-company">{notice.company}</p>
-      <p className="notice-role">{notice.role ?? "Role not named"}</p>
-      <p className="notice-status">{status}</p>
-      <p className="notice-sent">Sent {formatSentAt(notice.sentAt)}</p>
-    </>
   );
 }
 
@@ -739,15 +698,6 @@ function markLane(
     ...state,
     lanes: state.lanes.map((lane) => (lane.status === status ? { ...lane, ...patch } : lane)),
   };
-}
-
-function formatSentAt(sentAt: Date): string {
-  const day = sentAt.getUTCDate();
-  const month = MONTHS[sentAt.getUTCMonth()];
-  const year = sentAt.getUTCFullYear();
-  const hours = String(sentAt.getUTCHours()).padStart(2, "0");
-  const minutes = String(sentAt.getUTCMinutes()).padStart(2, "0");
-  return `${day} ${month} ${year}, ${hours}:${minutes} UTC`;
 }
 
 function isAbortError(error: unknown): boolean {

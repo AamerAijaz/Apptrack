@@ -1,14 +1,22 @@
 import { ConnectGmail } from "./auth/ConnectGmail";
 import { Masthead, useMastheadSession } from "./Masthead";
+import { NoticeCardView } from "./notices/NoticeCardView";
+
+const EXAMPLE_NOTICE = {
+  id: "example",
+  company: "Northwind Freight",
+  role: "Data Analyst",
+  sentAt: new Date(Date.UTC(2026, 2, 4, 9, 15)),
+} as const;
 
 export function Landing() {
-  const session = useMastheadSession();
+  const { session, signOut } = useMastheadSession();
   const signedIn = session.kind === "signed-in";
   const signedOut = session.kind === "signed-out";
 
   return (
     <>
-      <Masthead session={session} />
+      <Masthead session={session} onSignOut={signOut} />
       <main>
         <section className="hero" aria-labelledby="hero-title">
           <div className="hero-copy">
@@ -32,7 +40,7 @@ export function Landing() {
               </>
             ) : signedIn ? (
               <a className="connect connect--primary" href="/notices">
-                Notices
+                View Applications
               </a>
             ) : null}
           </div>
@@ -72,15 +80,7 @@ export function Landing() {
 function ApplicationSpecimen() {
   return (
     <aside className="specimen" aria-label="Example Job Application">
-      <p className="specimen-label">Example</p>
-      <p className="specimen-company">Northwind Freight</p>
-      <p className="specimen-role">Data Analyst</p>
-      <ol className="specimen-path">
-        <li>Application Sent</li>
-        <li>Interviewing</li>
-        <li>Accepted</li>
-      </ol>
-      <p className="specimen-source">From “Your application to Northwind Freight”</p>
+      <NoticeCardView notice={EXAMPLE_NOTICE} tone="sent" status="Application Sent" />
     </aside>
   );
 }

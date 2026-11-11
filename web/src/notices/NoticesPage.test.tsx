@@ -31,9 +31,27 @@ test("shows a loading status until the request settles", async () => {
 
   const photo = await screen.findByRole("img", { name: "ada@gmail.com" });
   expect(photo).toHaveAttribute("src", PICTURE);
-  expect(photo.closest("a")).toHaveAttribute("href", "/notices");
+  expect(photo.closest("button")).toHaveAttribute("aria-haspopup", "menu");
   expect(screen.queryByText(/Signed in as/)).not.toBeInTheDocument();
   expect(screen.queryByRole("status")).not.toBeInTheDocument();
+});
+
+test("signing out leaves the notices page signed out", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+    const url = String(input);
+    if (url === "/api/session/sign-out") return Promise.resolve(new Response(null, { status: 204 }));
+    if (url === "/api/session") return Promise.resolve(sessionResponse());
+    return Promise.resolve(jsonResponse(200, board()));
+  });
+
+  render(<NoticesPage />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "ada@gmail.com" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Sign out" }));
+
+  expect(await screen.findByText("You're not signed in.")).toBeInTheDocument();
+  expect(screen.queryByRole("img")).not.toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Connect" })).toBeInTheDocument();
 });
 
 test("401 shows the signed-out message and Connect", async () => {
