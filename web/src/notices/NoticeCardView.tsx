@@ -20,22 +20,8 @@ export function NoticeCardView({
   return (
     <article
       className={`notice-card notice-card--${tone}${lifted ? " is-lifted" : ""}`}
-      onPointerDown={
-        onPointerDown === undefined
-          ? undefined
-          : (event) => {
-              const fromHandle =
-                event.target instanceof Element && event.target.closest(".notice-drag") !== null;
-              if (event.pointerType === "touch" && !fromHandle) return;
-              onPointerDown(event);
-            }
-      }
+      onPointerDown={onPointerDown}
     >
-      {onPointerDown === undefined ? null : (
-        <span className="notice-drag" aria-hidden="true">
-          Drag
-        </span>
-      )}
       <CardCopy notice={notice} status={status} />
     </article>
   );
