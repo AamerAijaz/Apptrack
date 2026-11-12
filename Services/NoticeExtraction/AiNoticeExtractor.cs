@@ -37,9 +37,10 @@ public sealed partial class AiNoticeExtractor(
         }
         """);
 
+    // A successful read stays cached. A failed read does not, so a later attempt can see corrected settings.
     private readonly Lazy<ModelSlot[]> _slots = new(
         () => ModelSlot.ReadAll(configuration, handler, logger),
-        LazyThreadSafetyMode.ExecutionAndPublication);
+        LazyThreadSafetyMode.PublicationOnly);
 
     /// <summary>
     /// The first model to try is this value modulo the slot count.
@@ -253,8 +254,8 @@ public sealed partial class AiNoticeExtractor(
             var apiKey = Required(section, "ApiKey");
             var model = Required(section, "Model");
             var route = Required(section, "BaseUrl");
-            if (!Uri.TryCreate(route, UriKind.Absolute, out var baseUrl))
-                throw new NoticeExtractionUnavailableException($"{section.Path}:BaseUrl is not configured.");
+            if (!Uri.TryCreate(route, UriKind.Absolute, out var baseUrl) || baseUrl.Scheme != Uri.UriSchemeHttps)
+                throw new NoticeExtractionUnavailableException($"{section.Path}:BaseUrl must be an absolute https URL.");
 
             var workspaceId = section["WorkspaceId"];
             return new AiSettings(

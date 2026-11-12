@@ -248,6 +248,68 @@ public sealed class LlmNoticeExtractorTests
         Assert.False(called);
     }
 
+    [Fact]
+    public async Task A_corrected_model_setting_is_read_on_the_next_attempt()
+    {
+        var settings = new ChangeableSettings();
+        settings.Set("Ai:ApiKey", "test-key");
+        settings.Set("Ai:BaseUrl", Route);
+        var configuration = new ConfigurationBuilder().Add(settings).Build();
+        var called = false;
+        var extractor = new AiNoticeExtractor(
+            configuration,
+            new StubHandler(_ =>
+            {
+                called = true;
+                return JsonResponse("""{"company":"Acme","role":"Engineer","status":"Application Sent"}""");
+            }));
+        const string content = """
+            From: Acme Careers <jobs@acme.com>
+            Subject: Thanks for applying
+            Date: Tue, 03 Nov 2026 14:30:00 +0000
+
+            We received your application for Engineer.
+            """;
+
+        var missing = await Assert.ThrowsAsync<NoticeExtractionUnavailableException>(() =>
+            extractor.ExtractAsync("msg-1", content, CancellationToken.None));
+
+        Assert.Equal("Ai:Model is not configured.", missing.Message);
+        Assert.False(called);
+
+        settings.Set("Ai:Model", "configured-model");
+
+        var notice = await extractor.ExtractAsync("msg-2", content, CancellationToken.None);
+
+        Assert.NotNull(notice);
+        Assert.Equal("Acme", notice.Company);
+        Assert.True(called);
+    }
+
+    [Fact]
+    public async Task A_plaintext_model_url_fails_before_the_request()
+    {
+        var called = false;
+        var extractor = Extractor(
+            _ =>
+            {
+                called = true;
+                return new HttpResponseMessage(HttpStatusCode.OK);
+            },
+            new Dictionary<string, string?>
+            {
+                ["Ai:ApiKey"] = "test-key",
+                ["Ai:Model"] = "configured-model",
+                ["Ai:BaseUrl"] = "http://llm.example/v1/",
+            });
+
+        var ex = await Assert.ThrowsAsync<NoticeExtractionUnavailableException>(() =>
+            extractor.ExtractAsync("msg-1", "From: Acme\n\nThanks", CancellationToken.None));
+
+        Assert.Equal("Ai:BaseUrl must be an absolute https URL.", ex.Message);
+        Assert.False(called);
+    }
+
     [Theory]
     [InlineData(HttpStatusCode.TooManyRequests)]
     [InlineData(HttpStatusCode.PaymentRequired)]
@@ -495,6 +557,11 @@ public sealed class LlmNoticeExtractorTests
             })
             .Build();
         return new AiNoticeExtractor(configuration, new StubHandler(respond), logger);
+    }
+
+    private sealed class ChangeableSettings : ConfigurationProvider, IConfigurationSource
+    {
+        public IConfigurationProvider Build(IConfigurationBuilder builder) => this;
     }
 
     private sealed class CollectingLogger : ILogger<AiNoticeExtractor>
