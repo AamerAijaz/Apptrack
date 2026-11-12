@@ -1,5 +1,7 @@
 using System.ClientModel;
 using System.ClientModel.Primitives;
+using System.Globalization;
+using System.Net;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
@@ -10,8 +12,9 @@ namespace Apptrack.Services.NoticeExtraction;
 
 /// <summary>
 /// Reads one application notice from message content with a language model.
-/// Chat completions go through the OpenAI SDK. <c>Ai:BaseUrl</c> is the base URL,
-/// so the same client can call OpenAI or Anthropic's compatible endpoint.
+/// Chat completions go through the OpenAI SDK. The first model is <c>Ai:BaseUrl</c>,
+/// <c>Ai:Model</c>, and <c>Ai:ApiKey</c>. Further models are <c>Ai:2</c>, <c>Ai:3</c>, and so on.
+/// A usage-limit response sticks later calls on the next model.
 /// The sent time is taken from the content's Date header, not from the model, and falls back
 /// to the current time when that header is missing or cannot be read.
 /// </summary>
@@ -34,40 +37,20 @@ public sealed partial class AiNoticeExtractor(
         }
         """);
 
-    private ChatClient? _chat;
+    private readonly Lazy<ModelSlot[]> _slots = new(
+        () => ModelSlot.ReadAll(configuration, handler, logger),
+        LazyThreadSafetyMode.ExecutionAndPublication);
+
+    /// <summary>
+    /// The first model to try is this value modulo the slot count.
+    /// A call walks forward from the value it read. Only <see cref="Advance"/> writes it,
+    /// and only when the cursor is still the slot that call just found limited.
+    /// </summary>
+    private long _cursor;
 
     public async Task<ApplicationNotice?> ExtractAsync(string messageId, string content, CancellationToken ct)
     {
-        if (!AiSettings.TryRead(configuration, out var settings, out var missing) || settings is null)
-            throw new NoticeExtractionUnavailableException($"{missing} is not configured.");
-
-        ChatCompletion completion;
-        try
-        {
-            completion = await ClientFor(settings).CompleteChatAsync(
-                [
-                    new SystemChatMessage(Classification.SystemPrompt),
-                    new UserChatMessage(content),
-                ],
-                new ChatCompletionOptions
-                {
-                    Temperature = 0,
-                    ResponseFormat = ChatResponseFormat.CreateJsonSchemaFormat(
-                        "application_notice",
-                        NoticeSchema,
-                        jsonSchemaIsStrict: true),
-                },
-                ct);
-        }
-        catch (ClientResultException ex)
-        {
-            throw new NoticeExtractionUnavailableException($"The language model returned {ex.Status}.", ex);
-        }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-        {
-            throw new NoticeExtractionUnavailableException("The language model request timed out.");
-        }
-
+        var completion = await ParseContentAsync(content, ct);
         var text = completion.Content.Count > 0 ? completion.Content[0].Text : null;
         if (string.IsNullOrWhiteSpace(text))
             throw new NoticeExtractionUnavailableException("The language model returned no classification.");
@@ -87,24 +70,64 @@ public sealed partial class AiNoticeExtractor(
         return notice;
     }
 
-    private ChatClient ClientFor(AiSettings settings)
+    /// <summary>
+    /// Attempts a model call to parse the email content.
+    /// Retries if an exception is thrown due to usage limits and more than one model has been configured.
+    /// </summary>
+    private async Task<ChatCompletion> ParseContentAsync(string content, CancellationToken ct)
     {
-        if (_chat is not null)
-            return _chat;
-
-        var options = new OpenAIClientOptions
+        var slots = _slots.Value;
+        var start = Volatile.Read(ref _cursor);
+        ClientResultException? lastLimit = null;
+        for (var attempt = 0; attempt < slots.Length; attempt++)
         {
-            Endpoint = BaseEndpoint(settings.BaseUrl),
-            NetworkTimeout = RequestTimeout,
-        };
-        if (handler is not null)
-            options.Transport = new HttpClientPipelineTransport(new HttpClient(handler, disposeHandler: false));
-        if (settings.WorkspaceId is not null)
-            options.AddPolicy(new WorkspaceHeaderPolicy(settings.WorkspaceId), PipelinePosition.PerCall);
+            var observed = start + attempt;
+            var slot = slots[(int)(observed % slots.Length)];
+            try
+            {
+                return await slot.Chat.CompleteChatAsync(
+                    [
+                        new SystemChatMessage(Classification.SystemPrompt),
+                        new UserChatMessage(content),
+                    ],
+                    new ChatCompletionOptions
+                    {
+                        Temperature = 0,
+                        ResponseFormat = ChatResponseFormat.CreateJsonSchemaFormat(
+                            "application_notice",
+                            NoticeSchema,
+                            jsonSchemaIsStrict: true),
+                    },
+                    ct);
+            }
+            catch (ClientResultException ex) when (IsUsageLimit(ex.Status))
+            {
+                lastLimit = ex;
+                Advance(observed);
+            }
+            catch (ClientResultException ex)
+            {
+                throw new NoticeExtractionUnavailableException($"The language model returned {ex.Status}.", ex);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                throw new NoticeExtractionUnavailableException("The language model request timed out.");
+            }
+        }
 
-        _chat = new ChatClient(settings.Model, new ApiKeyCredential(settings.ApiKey), options);
-        return _chat;
+        if (slots.Length == 1)
+            throw new NoticeExtractionUnavailableException($"The language model returned {lastLimit!.Status}.", lastLimit);
+
+        throw new NoticeExtractionUnavailableException(
+            "Every configured language model is usage-limited.",
+            lastLimit);
     }
+
+    private void Advance(long observed) =>
+        Interlocked.CompareExchange(ref _cursor, observed + 1, observed);
+
+    private static bool IsUsageLimit(int status) =>
+        status is (int)HttpStatusCode.TooManyRequests or (int)HttpStatusCode.PaymentRequired;
 
     private static Uri BaseEndpoint(Uri route)
     {
@@ -127,42 +150,127 @@ public sealed partial class AiNoticeExtractor(
         }
     }
 
-    private sealed record AiSettings(string ApiKey, string Model, Uri BaseUrl, string? WorkspaceId)
+    private sealed record ModelSlot(string Section, string Model, ChatClient Chat)
     {
-        public static bool TryRead(IConfiguration configuration, out AiSettings? settings, out string? missingKey)
+        public static ModelSlot[] ReadAll(
+            IConfiguration configuration,
+            HttpMessageHandler? handler,
+            ILogger? logger)
         {
-            var apiKey = configuration["Ai:ApiKey"];
-            if (string.IsNullOrWhiteSpace(apiKey))
+            try
             {
-                settings = null;
-                missingKey = "Ai:ApiKey";
-                return false;
+                var slots = Read(configuration, handler);
+                logger?.LogInformation(
+                    "Notice extraction models: {Models}",
+                    string.Join(", ", slots.Select(slot => $"{slot.Section} {slot.Model}")));
+                return slots;
+            }
+            catch (NoticeExtractionUnavailableException ex)
+            {
+                logger?.LogError("{Message}", ex.Message);
+                throw;
+            }
+        }
+
+        private static ModelSlot[] Read(IConfiguration configuration, HttpMessageHandler? handler)
+        {
+            var root = configuration.GetSection("Ai");
+            var extras = new List<IConfigurationSection>();
+            foreach (var child in root.GetChildren())
+            {
+                if (IsRootLeaf(child.Key))
+                    continue;
+                if (!IsExtraSlot(child.Key))
+                    throw new NoticeExtractionUnavailableException(
+                        $"Ai:{child.Key} is not a model slot. Extra models are Ai:2, Ai:3, and so on.");
+                extras.Add(child);
             }
 
-            var model = configuration["Ai:Model"];
-            if (string.IsNullOrWhiteSpace(model))
-            {
-                settings = null;
-                missingKey = "Ai:Model";
-                return false;
-            }
+            extras.Sort((left, right) => SlotNumber(left.Key).CompareTo(SlotNumber(right.Key)));
+            var slots = new ModelSlot[1 + extras.Count];
+            slots[0] = Build(AiSettings.Read(root), handler);
+            for (var i = 0; i < extras.Count; i++)
+                slots[i + 1] = Build(AiSettings.Read(extras[i]), handler);
+            return slots;
+        }
 
-            var route = configuration["Ai:BaseUrl"];
-            if (string.IsNullOrWhiteSpace(route) || !Uri.TryCreate(route.Trim(), UriKind.Absolute, out var baseUrl))
-            {
-                settings = null;
-                missingKey = "Ai:BaseUrl";
-                return false;
-            }
+        private static bool IsRootLeaf(string key) =>
+            key.Equals("ApiKey", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("Model", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("BaseUrl", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("WorkspaceId", StringComparison.OrdinalIgnoreCase);
 
-            var workspaceId = configuration["Ai:WorkspaceId"];
-            settings = new AiSettings(
-                apiKey.Trim(),
-                model.Trim(),
+        private static bool IsExtraSlot(string key) =>
+            int.TryParse(key, NumberStyles.None, CultureInfo.InvariantCulture, out var number)
+            && number >= 2
+            && key == number.ToString(CultureInfo.InvariantCulture);
+
+        private static int SlotNumber(string key) =>
+            int.Parse(key, NumberStyles.None, CultureInfo.InvariantCulture);
+
+        private static ModelSlot Build(AiSettings settings, HttpMessageHandler? handler)
+        {
+            var options = new OpenAIClientOptions
+            {
+                Endpoint = BaseEndpoint(settings.BaseUrl),
+                NetworkTimeout = RequestTimeout,
+                RetryPolicy = new UsageLimitRetryPolicy(),
+            };
+            if (handler is not null)
+                options.Transport = new HttpClientPipelineTransport(new HttpClient(handler, disposeHandler: false));
+            if (settings.WorkspaceId is not null)
+                options.AddPolicy(new WorkspaceHeaderPolicy(settings.WorkspaceId), PipelinePosition.PerCall);
+
+            return new ModelSlot(
+                settings.Section,
+                settings.Model,
+                new ChatClient(settings.Model, new ApiKeyCredential(settings.ApiKey), options));
+        }
+    }
+
+    /// <summary>
+    /// Keeps the SDK retry budget, except a 429 or 402 is not retried.
+    /// That includes a setup with one model. The caller retries the message.
+    /// </summary>
+    private sealed class UsageLimitRetryPolicy() : ClientRetryPolicy(3)
+    {
+        protected override bool ShouldRetry(PipelineMessage message, Exception? exception) =>
+            !IsUsageLimit(message.Response) && base.ShouldRetry(message, exception);
+
+        protected override ValueTask<bool> ShouldRetryAsync(PipelineMessage message, Exception? exception) =>
+            IsUsageLimit(message.Response)
+                ? new ValueTask<bool>(false)
+                : base.ShouldRetryAsync(message, exception);
+
+        private static bool IsUsageLimit(PipelineResponse? response) =>
+            response is not null && AiNoticeExtractor.IsUsageLimit(response.Status);
+    }
+
+    private sealed record AiSettings(string Section, string ApiKey, string Model, Uri BaseUrl, string? WorkspaceId)
+    {
+        public static AiSettings Read(IConfigurationSection section)
+        {
+            var apiKey = Required(section, "ApiKey");
+            var model = Required(section, "Model");
+            var route = Required(section, "BaseUrl");
+            if (!Uri.TryCreate(route, UriKind.Absolute, out var baseUrl))
+                throw new NoticeExtractionUnavailableException($"{section.Path}:BaseUrl is not configured.");
+
+            var workspaceId = section["WorkspaceId"];
+            return new AiSettings(
+                section.Path,
+                apiKey,
+                model,
                 baseUrl,
                 string.IsNullOrWhiteSpace(workspaceId) ? null : workspaceId.Trim());
-            missingKey = null;
-            return true;
+        }
+
+        private static string Required(IConfigurationSection section, string key)
+        {
+            var value = section[key];
+            return !string.IsNullOrWhiteSpace(value)
+                ? value.Trim()
+                : throw new NoticeExtractionUnavailableException($"{section.Path}:{key} is not configured.");
         }
     }
 
