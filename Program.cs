@@ -1,3 +1,4 @@
+using Apptrack;
 using Apptrack.Auth;
 using Apptrack.Data;
 using Apptrack.Endpoints;
@@ -59,6 +60,7 @@ builder.Services.AddScoped<NoticesService>();
 builder.Services.AddScoped<SessionProfileService>();
 
 var app = builder.Build();
+app.UseRequestLog();
 var flow = app.Services.GetRequiredService<ApptrackAuthorizationCodeFlow>();
 
 app.MapGet("/api/auth", (HttpContext ctx) =>
