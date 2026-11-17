@@ -15,4 +15,5 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<GoogleAccessToken> GoogleAccessTokens => Set<GoogleAccessToken>();
     public DbSet<GmailWatch> GmailWatches => Set<GmailWatch>();
     public DbSet<ApplicationNotice> ApplicationNotices => Set<ApplicationNotice>();
+    public DbSet<AppliedMailboxMessage> AppliedMailboxMessages => Set<AppliedMailboxMessage>();
 }

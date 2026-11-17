@@ -53,6 +53,7 @@ namespace apptrack.Migrations
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Status")
+                        .IsConcurrencyToken()
                         .IsRequired()
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");
@@ -66,14 +67,33 @@ namespace apptrack.Migrations
                         .IsUnique();
 
                     b.HasIndex("UserId", "Status", "CreatedAt", "Id")
+                        .IsDescending(false, false, true, true)
                         .HasDatabaseName("IX_application_notices_lane")
-                        .HasFilter("\"DeletedAt\" IS NULL")
-                        .IsDescending(false, false, true, true);
+                        .HasFilter("\"DeletedAt\" IS NULL");
 
                     b.ToTable("application_notices", null, t =>
                         {
                             t.HasCheckConstraint("CK_application_notices_Status", "\"Status\" IN ('Application Sent', 'Interviewing', 'Accepted', 'Rejected')");
                         });
+                });
+
+            modelBuilder.Entity("Apptrack.Entities.AppliedMailboxMessage", b =>
+                {
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("MessageId")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<Guid>("NoticeId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("UserId", "MessageId");
+
+                    b.HasIndex("NoticeId");
+
+                    b.ToTable("applied_mailbox_messages", (string)null);
                 });
 
             modelBuilder.Entity("Apptrack.Entities.GmailWatch", b =>
@@ -171,6 +191,21 @@ namespace apptrack.Migrations
 
             modelBuilder.Entity("Apptrack.Entities.ApplicationNotice", b =>
                 {
+                    b.HasOne("Apptrack.Entities.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Apptrack.Entities.AppliedMailboxMessage", b =>
+                {
+                    b.HasOne("Apptrack.Entities.ApplicationNotice", null)
+                        .WithMany()
+                        .HasForeignKey("NoticeId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
                     b.HasOne("Apptrack.Entities.User", null)
                         .WithMany()
                         .HasForeignKey("UserId")

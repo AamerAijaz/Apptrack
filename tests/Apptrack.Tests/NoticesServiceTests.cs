@@ -373,6 +373,477 @@ public sealed class NoticesServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_rejection_advances_the_application_sent_notice_for_the_same_company_and_role()
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Application Sent", At(3));
+        var existing = await _db.ApplicationNotices.SingleAsync();
+        var id = existing.Id;
+        var sentAt = existing.SentAt;
+        var createdAt = existing.CreatedAt;
+        _db.ChangeTracker.Clear();
+
+        var result = await _notices.Add(
+            userId,
+            Mail("inbox-2", "Acme", "Engineer", "Rejected", At(4), "We will not be progressing"),
+            CancellationToken.None);
+
+        var stored = Assert.IsType<AddNoticeResult.Stored>(result);
+        Assert.Equal(id, stored.Card.Id);
+        Assert.Equal(NoticeStatus.Rejected, stored.Status);
+        Assert.Equal(DateTime.SpecifyKind(sentAt, DateTimeKind.Utc), stored.Card.SentAt);
+        Assert.Equal("Acme", stored.Card.Company);
+        Assert.Equal("Engineer", stored.Card.Role);
+
+        _db.ChangeTracker.Clear();
+        var row = await _db.ApplicationNotices.SingleAsync();
+        Assert.Equal("inbox-1", row.MessageId);
+        Assert.Equal("Rejected", row.Status);
+        Assert.Equal(sentAt, row.SentAt);
+        Assert.Equal(createdAt, row.CreatedAt);
+        Assert.Equal("body", row.Content);
+
+        var sent = await _notices.GetNotices(userId, NoticeStatus.ApplicationSent, 12, 0, CancellationToken.None);
+        Assert.Empty(sent!.Notices);
+        var rejected = await _notices.GetNotices(userId, NoticeStatus.Rejected, 12, 0, CancellationToken.None);
+        Assert.Equal(id, Assert.Single(rejected!.Notices).Id);
+    }
+
+    [Fact]
+    public async Task An_interviewing_email_advances_the_application_sent_notice()
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Application Sent", At(1));
+        var id = await _db.ApplicationNotices.Select(n => n.Id).SingleAsync();
+        _db.ChangeTracker.Clear();
+
+        var stored = Assert.IsType<AddNoticeResult.Stored>(await _notices.Add(
+            userId, Mail("inbox-2", "Acme", "Engineer", "Interviewing", At(2), "Please book a screen"), CancellationToken.None));
+
+        Assert.Equal(id, stored.Card.Id);
+        Assert.Equal(NoticeStatus.Interviewing, stored.Status);
+        Assert.Equal([id], (await Lane(userId, NoticeStatus.Interviewing)).Select(n => n.Id));
+        Assert.Empty(await Lane(userId, NoticeStatus.ApplicationSent));
+    }
+
+    [Fact]
+    public async Task An_acceptance_email_advances_application_sent_or_interviewing()
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Application Sent", At(1));
+        await SeedNotice(userId, "inbox-2", "Beta", "Designer", "Interviewing", At(1));
+        var acme = await _db.ApplicationNotices.SingleAsync(n => n.Company == "Acme");
+        var beta = await _db.ApplicationNotices.SingleAsync(n => n.Company == "Beta");
+        _db.ChangeTracker.Clear();
+
+        var acceptedAcme = Assert.IsType<AddNoticeResult.Stored>(await _notices.Add(
+            userId, Mail("inbox-3", "Acme", "Engineer", "Accepted", At(2), "Your offer"), CancellationToken.None));
+        var acceptedBeta = Assert.IsType<AddNoticeResult.Stored>(await _notices.Add(
+            userId, Mail("inbox-4", "Beta", "Designer", "Accepted", At(2), "Your offer"), CancellationToken.None));
+
+        Assert.Equal(acme.Id, acceptedAcme.Card.Id);
+        Assert.Equal(NoticeStatus.Accepted, acceptedAcme.Status);
+        Assert.Equal(beta.Id, acceptedBeta.Card.Id);
+        Assert.Equal(NoticeStatus.Accepted, acceptedBeta.Status);
+        Assert.Equal(acme.SentAt, acceptedAcme.Card.SentAt);
+        Assert.Equal(["Acme", "Beta"], (await Lane(userId, NoticeStatus.Accepted)).Select(n => n.Company).OrderBy(company => company));
+        Assert.Empty(await Lane(userId, NoticeStatus.ApplicationSent));
+        Assert.Empty(await Lane(userId, NoticeStatus.Interviewing));
+    }
+
+    [Fact]
+    public async Task A_rejection_advances_interviewing_or_accepted()
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Interviewing", At(1));
+        await SeedNotice(userId, "inbox-2", "Beta", "Designer", "Accepted", At(1));
+        var acme = await _db.ApplicationNotices.Where(n => n.Company == "Acme").Select(n => n.Id).SingleAsync();
+        var beta = await _db.ApplicationNotices.Where(n => n.Company == "Beta").Select(n => n.Id).SingleAsync();
+        _db.ChangeTracker.Clear();
+
+        var rejectedAcme = Assert.IsType<AddNoticeResult.Stored>(await _notices.Add(
+            userId, Mail("inbox-3", "Acme", "Engineer", "Rejected", At(2), "Not moving forward"), CancellationToken.None));
+        var rejectedBeta = Assert.IsType<AddNoticeResult.Stored>(await _notices.Add(
+            userId, Mail("inbox-4", "Beta", "Designer", "Rejected", At(2), "Not moving forward"), CancellationToken.None));
+
+        Assert.Equal(acme, rejectedAcme.Card.Id);
+        Assert.Equal(beta, rejectedBeta.Card.Id);
+        Assert.Equal(NoticeStatus.Rejected, rejectedAcme.Status);
+        Assert.Equal(["Acme", "Beta"], (await Lane(userId, NoticeStatus.Rejected)).Select(n => n.Company).OrderBy(company => company));
+        Assert.Empty(await Lane(userId, NoticeStatus.Interviewing));
+        Assert.Empty(await Lane(userId, NoticeStatus.Accepted));
+    }
+
+    [Fact]
+    public async Task A_rejection_moves_the_newest_earlier_notice_and_leaves_the_older_one()
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Interviewing", At(1));
+        await SeedNotice(userId, "inbox-2", "Acme", "Engineer", "Application Sent", At(2));
+        var older = await _db.ApplicationNotices.SingleAsync(n => n.MessageId == "inbox-1");
+        var newer = await _db.ApplicationNotices.SingleAsync(n => n.MessageId == "inbox-2");
+        _db.ChangeTracker.Clear();
+
+        var stored = Assert.IsType<AddNoticeResult.Stored>(await _notices.Add(
+            userId, Mail("inbox-3", "Acme", "Engineer", "Rejected", At(3), "Not moving forward"), CancellationToken.None));
+
+        Assert.Equal(newer.Id, stored.Card.Id);
+        Assert.Equal(NoticeStatus.Rejected, stored.Status);
+        Assert.Equal("inbox-2", await _db.ApplicationNotices.Where(n => n.Id == newer.Id).Select(n => n.MessageId).SingleAsync());
+        Assert.Equal("Interviewing", await _db.ApplicationNotices.Where(n => n.Id == older.Id).Select(n => n.Status).SingleAsync());
+        Assert.Equal([older.Id], (await Lane(userId, NoticeStatus.Interviewing)).Select(n => n.Id));
+        Assert.Equal([newer.Id], (await Lane(userId, NoticeStatus.Rejected)).Select(n => n.Id));
+    }
+
+    [Fact]
+    public async Task The_same_recorded_time_moves_the_later_notice_id()
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Application Sent", At(1));
+        await SeedNotice(userId, "inbox-2", "Acme", "Engineer", "Application Sent", At(1));
+        var first = await _db.ApplicationNotices.SingleAsync(n => n.MessageId == "inbox-1");
+        var second = await _db.ApplicationNotices.SingleAsync(n => n.MessageId == "inbox-2");
+        await _db.Database.ExecuteSqlRawAsync(
+            "UPDATE application_notices SET CreatedAt = {0}", first.CreatedAt);
+        _db.ChangeTracker.Clear();
+
+        var stored = Assert.IsType<AddNoticeResult.Stored>(await _notices.Add(
+            userId, Mail("inbox-3", "Acme", "Engineer", "Rejected", At(2), "Not moving forward"), CancellationToken.None));
+
+        Assert.Equal(second.Id, stored.Card.Id);
+        Assert.Equal("Application Sent", await _db.ApplicationNotices.Where(n => n.Id == first.Id).Select(n => n.Status).SingleAsync());
+    }
+
+    [Theory]
+    [InlineData("Interviewing")]
+    [InlineData("Accepted")]
+    [InlineData("Rejected")]
+    public async Task A_repeat_of_the_current_status_does_not_add_a_card(string status)
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", status, At(1));
+        var existing = await _db.ApplicationNotices.SingleAsync();
+        _db.ChangeTracker.Clear();
+
+        var stored = Assert.IsType<AddNoticeResult.Stored>(await _notices.Add(
+            userId, Mail("inbox-2", "Acme", "Engineer", status, At(2), "Again"), CancellationToken.None));
+
+        Assert.Equal(existing.Id, stored.Card.Id);
+        Assert.Equal(status, stored.Status.Label);
+        Assert.Equal("inbox-1", await _db.ApplicationNotices.Select(n => n.MessageId).SingleAsync());
+        Assert.Equal("body", await _db.ApplicationNotices.Select(n => n.Content).SingleAsync());
+        Assert.Equal([existing.Id], (await Lane(userId, stored.Status)).Select(n => n.Id));
+    }
+
+    [Fact]
+    public async Task An_interviewing_email_leaves_an_accepted_notice_in_place()
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Accepted", At(1));
+        var id = await _db.ApplicationNotices.Select(n => n.Id).SingleAsync();
+        _db.ChangeTracker.Clear();
+
+        var stored = Assert.IsType<AddNoticeResult.Stored>(await _notices.Add(
+            userId, Mail("inbox-2", "Acme", "Engineer", "Interviewing", At(2), "Please book a screen"), CancellationToken.None));
+
+        Assert.Equal(id, stored.Card.Id);
+        Assert.Equal(NoticeStatus.Accepted, stored.Status);
+        Assert.Equal("inbox-1", await _db.ApplicationNotices.Select(n => n.MessageId).SingleAsync());
+        Assert.Equal([id], (await Lane(userId, NoticeStatus.Accepted)).Select(n => n.Id));
+        Assert.Empty(await Lane(userId, NoticeStatus.Interviewing));
+    }
+
+    [Theory]
+    [InlineData("Interviewing")]
+    [InlineData("Accepted")]
+    public async Task Interviewing_or_accepted_after_a_rejection_starts_a_separate_notice(string status)
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Rejected", At(1));
+        var rejectedId = await _db.ApplicationNotices.Select(n => n.Id).SingleAsync();
+        _db.ChangeTracker.Clear();
+
+        var stored = Assert.IsType<AddNoticeResult.Stored>(await _notices.Add(
+            userId, Mail("inbox-2", "Acme", "Engineer", status, At(2), "A new candidacy"), CancellationToken.None));
+
+        Assert.NotEqual(rejectedId, stored.Card.Id);
+        Assert.Equal(status, stored.Status.Label);
+        Assert.Equal("inbox-2", await _db.ApplicationNotices.Where(n => n.Id == stored.Card.Id).Select(n => n.MessageId).SingleAsync());
+        Assert.Equal("A new candidacy", await _db.ApplicationNotices.Where(n => n.Id == stored.Card.Id).Select(n => n.Content).SingleAsync());
+        Assert.Equal([rejectedId], (await Lane(userId, NoticeStatus.Rejected)).Select(n => n.Id));
+        Assert.Equal([stored.Card.Id], (await Lane(userId, stored.Status)).Select(n => n.Id));
+    }
+
+    [Fact]
+    public async Task A_rejection_with_no_match_is_saved_on_its_own()
+    {
+        var userId = await SeedUser("ada@example.com");
+
+        var stored = Assert.IsType<AddNoticeResult.Stored>(await _notices.Add(
+            userId, Mail("inbox-1", "Acme", "Engineer", "Rejected", At(1), "Not moving forward"), CancellationToken.None));
+
+        Assert.Equal(NoticeStatus.Rejected, stored.Status);
+        Assert.Equal([stored.Card.Id], (await Lane(userId, NoticeStatus.Rejected)).Select(n => n.Id));
+    }
+
+    [Theory]
+    [InlineData("Rejected")]
+    [InlineData("Interviewing")]
+    public async Task Application_sent_is_saved_again_beside_a_rejected_or_open_notice(string existing)
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", existing, At(1));
+        var existingId = await _db.ApplicationNotices.Select(n => n.Id).SingleAsync();
+        _db.ChangeTracker.Clear();
+
+        var stored = Assert.IsType<AddNoticeResult.Stored>(await _notices.Add(
+            userId, Mail("inbox-2", "Acme", "Engineer", "Application Sent", At(2), "Thanks for applying"), CancellationToken.None));
+
+        Assert.NotEqual(existingId, stored.Card.Id);
+        Assert.Equal(NoticeStatus.ApplicationSent, stored.Status);
+        Assert.Equal(existing, await _db.ApplicationNotices.Where(n => n.Id == existingId).Select(n => n.Status).SingleAsync());
+        Assert.Contains(stored.Card.Id, (await Lane(userId, NoticeStatus.ApplicationSent)).Select(n => n.Id));
+    }
+
+    [Fact]
+    public async Task A_rejection_advances_the_new_application_and_leaves_the_old_rejection()
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Rejected", At(1));
+        await SeedNotice(userId, "inbox-2", "Acme", "Engineer", "Application Sent", At(2));
+        var finished = await _db.ApplicationNotices.SingleAsync(n => n.MessageId == "inbox-1");
+        var open = await _db.ApplicationNotices.SingleAsync(n => n.MessageId == "inbox-2");
+        _db.ChangeTracker.Clear();
+
+        var stored = Assert.IsType<AddNoticeResult.Stored>(await _notices.Add(
+            userId, Mail("inbox-3", "Acme", "Engineer", "Rejected", At(3), "Not moving forward"), CancellationToken.None));
+
+        Assert.Equal(open.Id, stored.Card.Id);
+        Assert.Equal("Rejected", await _db.ApplicationNotices.Where(n => n.Id == finished.Id).Select(n => n.Status).SingleAsync());
+        Assert.Equal("inbox-1", await _db.ApplicationNotices.Where(n => n.Id == finished.Id).Select(n => n.MessageId).SingleAsync());
+        Assert.Equal([open.Id, finished.Id], (await Lane(userId, NoticeStatus.Rejected)).Select(card => card.Id));
+    }
+
+    [Fact]
+    public async Task An_unnamed_role_matches_only_an_unnamed_role()
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", null, "Application Sent", At(1));
+        await SeedNotice(userId, "inbox-2", "Acme", "Engineer", "Application Sent", At(1));
+        var unnamed = await _db.ApplicationNotices.SingleAsync(n => n.Role == null);
+        var named = await _db.ApplicationNotices.SingleAsync(n => n.Role == "Engineer");
+        _db.ChangeTracker.Clear();
+
+        var matched = Assert.IsType<AddNoticeResult.Stored>(await _notices.Add(
+            userId, Mail("inbox-3", "Acme", null, "Rejected", At(2), "Not moving forward"), CancellationToken.None));
+        var separate = Assert.IsType<AddNoticeResult.Stored>(await _notices.Add(
+            userId, Mail("inbox-4", "Acme", null, "Interviewing", At(3), "A different candidacy"), CancellationToken.None));
+
+        Assert.Equal(unnamed.Id, matched.Card.Id);
+        Assert.Equal(NoticeStatus.Rejected, matched.Status);
+        Assert.NotEqual(named.Id, separate.Card.Id);
+        Assert.Equal("Application Sent", await _db.ApplicationNotices.Where(n => n.Id == named.Id).Select(n => n.Status).SingleAsync());
+        Assert.Equal(NoticeStatus.Interviewing, separate.Status);
+    }
+
+    [Fact]
+    public async Task A_different_role_or_company_or_capitalisation_is_a_separate_notice()
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Application Sent", At(1));
+        var original = await _db.ApplicationNotices.Select(n => n.Id).SingleAsync();
+        _db.ChangeTracker.Clear();
+
+        await _notices.Add(userId, Mail("inbox-2", "Acme", "Designer", "Rejected", At(2), "Other role"), CancellationToken.None);
+        await _notices.Add(userId, Mail("inbox-3", "Globex", "Engineer", "Rejected", At(2), "Other company"), CancellationToken.None);
+        await _notices.Add(userId, Mail("inbox-4", "acme", "Engineer", "Rejected", At(2), "Other capitals"), CancellationToken.None);
+
+        Assert.Equal("Application Sent", await _db.ApplicationNotices.Where(n => n.Id == original).Select(n => n.Status).SingleAsync());
+        Assert.Equal(4, await _db.ApplicationNotices.CountAsync());
+    }
+
+    [Fact]
+    public async Task Surrounding_spaces_still_match_the_stored_company_and_role()
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Application Sent", At(1));
+        var id = await _db.ApplicationNotices.Select(n => n.Id).SingleAsync();
+        _db.ChangeTracker.Clear();
+
+        var stored = Assert.IsType<AddNoticeResult.Stored>(await _notices.Add(
+            userId, Mail("inbox-2", " Acme ", " Engineer ", "Rejected", At(2), "Not moving forward"), CancellationToken.None));
+
+        Assert.Equal(id, stored.Card.Id);
+        Assert.Equal(NoticeStatus.Rejected, stored.Status);
+    }
+
+    [Fact]
+    public async Task Another_persons_notice_is_left_alone()
+    {
+        var ada = await SeedUser("ada@example.com");
+        var grace = await SeedUser("grace@example.com");
+        await SeedNotice(grace, "inbox-1", "Acme", "Engineer", "Application Sent", At(1));
+        var graceId = await _db.ApplicationNotices.Select(n => n.Id).SingleAsync();
+        _db.ChangeTracker.Clear();
+
+        var stored = Assert.IsType<AddNoticeResult.Stored>(await _notices.Add(
+            ada, Mail("inbox-2", "Acme", "Engineer", "Rejected", At(2), "Not moving forward"), CancellationToken.None));
+
+        Assert.NotEqual(graceId, stored.Card.Id);
+        Assert.Equal("Application Sent", await _db.ApplicationNotices.Where(n => n.Id == graceId).Select(n => n.Status).SingleAsync());
+        Assert.Equal([stored.Card.Id], (await Lane(ada, NoticeStatus.Rejected)).Select(n => n.Id));
+        Assert.Equal([graceId], (await Lane(grace, NoticeStatus.ApplicationSent)).Select(n => n.Id));
+    }
+
+    [Fact]
+    public async Task A_removed_notice_does_not_block_a_new_one()
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Application Sent", At(1));
+        await _db.Database.ExecuteSqlRawAsync(
+            "UPDATE application_notices SET DeletedAt = {0} WHERE MessageId = 'inbox-1'", DateTime.UtcNow);
+        _db.ChangeTracker.Clear();
+
+        var stored = Assert.IsType<AddNoticeResult.Stored>(await _notices.Add(
+            userId, Mail("inbox-2", "Acme", "Engineer", "Rejected", At(2), "Not moving forward"), CancellationToken.None));
+
+        Assert.Equal(NoticeStatus.Rejected, stored.Status);
+        Assert.Equal("inbox-2", await _db.ApplicationNotices.Where(n => n.DeletedAt == null).Select(n => n.MessageId).SingleAsync());
+    }
+
+    [Fact]
+    public async Task The_same_rejection_does_not_move_a_second_earlier_notice()
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Application Sent", At(1));
+        await SeedNotice(userId, "inbox-2", "Acme", "Engineer", "Application Sent", At(2));
+        var older = await _db.ApplicationNotices.SingleAsync(n => n.MessageId == "inbox-1");
+        var newer = await _db.ApplicationNotices.SingleAsync(n => n.MessageId == "inbox-2");
+        _db.ChangeTracker.Clear();
+
+        var mail = Mail("inbox-3", "Acme", "Engineer", "Rejected", At(3), "Not moving forward");
+        var first = Assert.IsType<AddNoticeResult.Stored>(await _notices.Add(userId, mail, CancellationToken.None));
+        var second = Assert.IsType<AddNoticeResult.Stored>(await _notices.Add(userId, mail, CancellationToken.None));
+
+        Assert.Equal(newer.Id, first.Card.Id);
+        Assert.Equal(newer.Id, second.Card.Id);
+        Assert.Equal(NoticeStatus.Rejected, second.Status);
+        Assert.Equal("Application Sent", await _db.ApplicationNotices.Where(n => n.Id == older.Id).Select(n => n.Status).SingleAsync());
+        Assert.Equal("inbox-2", await _db.ApplicationNotices.Where(n => n.Id == newer.Id).Select(n => n.MessageId).SingleAsync());
+    }
+
+    [Fact]
+    public async Task A_repeated_interviewing_email_does_not_advance_a_notice_saved_later()
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Accepted", At(1));
+        var accepted = await _db.ApplicationNotices.Select(n => n.Id).SingleAsync();
+        _db.ChangeTracker.Clear();
+
+        var mail = Mail("inbox-2", "Acme", "Engineer", "Interviewing", At(2), "Please book a screen");
+        var first = Assert.IsType<AddNoticeResult.Stored>(await _notices.Add(userId, mail, CancellationToken.None));
+        await SeedNotice(userId, "inbox-3", "Acme", "Engineer", "Application Sent", At(3));
+        var sentId = await _db.ApplicationNotices.Where(n => n.MessageId == "inbox-3").Select(n => n.Id).SingleAsync();
+        _db.ChangeTracker.Clear();
+
+        var second = Assert.IsType<AddNoticeResult.Stored>(await _notices.Add(userId, mail, CancellationToken.None));
+
+        Assert.Equal(accepted, first.Card.Id);
+        Assert.Equal(accepted, second.Card.Id);
+        Assert.Equal(NoticeStatus.Accepted, second.Status);
+        Assert.Equal("Application Sent", await _db.ApplicationNotices.Where(n => n.Id == sentId).Select(n => n.Status).SingleAsync());
+    }
+
+    [Fact]
+    public async Task A_repeat_of_an_applied_message_stays_retired_after_the_notice_is_removed()
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Application Sent", At(1));
+        var mail = Mail("inbox-2", "Acme", "Engineer", "Rejected", At(2), "Not moving forward");
+        await _notices.Add(userId, mail, CancellationToken.None);
+        await _db.Database.ExecuteSqlRawAsync(
+            "UPDATE application_notices SET DeletedAt = {0}", DateTime.UtcNow);
+        _db.ChangeTracker.Clear();
+
+        var result = await _notices.Add(userId, mail, CancellationToken.None);
+
+        Assert.IsType<AddNoticeResult.Retired>(result);
+        Assert.Equal(0, await _db.ApplicationNotices.CountAsync());
+    }
+
+    [Fact]
+    public async Task The_same_mailbox_message_does_not_move_the_stored_notice()
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Application Sent", At(1));
+        var id = await _db.ApplicationNotices.Select(n => n.Id).SingleAsync();
+        _db.ChangeTracker.Clear();
+
+        var stored = Assert.IsType<AddNoticeResult.Stored>(await _notices.Add(
+            userId, Mail("inbox-1", "Acme", "Engineer", "Rejected", At(2), "Not moving forward"), CancellationToken.None));
+
+        Assert.Equal(id, stored.Card.Id);
+        Assert.Equal(NoticeStatus.ApplicationSent, stored.Status);
+        Assert.Equal("body", await _db.ApplicationNotices.Select(n => n.Content).SingleAsync());
+        Assert.Equal([id], (await Lane(userId, NoticeStatus.ApplicationSent)).Select(n => n.Id));
+    }
+
+    [Fact]
+    public async Task A_removed_message_stays_retired_and_does_not_advance_another_notice()
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Application Sent", At(1));
+        await SeedNotice(userId, "inbox-2", "Acme", "Engineer", "Application Sent", At(2));
+        await _db.Database.ExecuteSqlRawAsync(
+            "UPDATE application_notices SET DeletedAt = {0} WHERE MessageId = 'inbox-1'", DateTime.UtcNow);
+        _db.ChangeTracker.Clear();
+
+        var result = await _notices.Add(
+            userId, Mail("inbox-1", "Acme", "Engineer", "Rejected", At(3), "Not moving forward"), CancellationToken.None);
+
+        Assert.IsType<AddNoticeResult.Retired>(result);
+        Assert.Equal("Application Sent", await _db.ApplicationNotices.Where(n => n.MessageId == "inbox-2").Select(n => n.Status).SingleAsync());
+    }
+
+    [Fact]
+    public async Task A_hand_added_notice_advances_when_the_matching_email_arrives()
+    {
+        var userId = await SeedUser("ada@example.com");
+        var hand = IncomingNotice.TryHand("Acme", "Engineer", "Application Sent", Guid.NewGuid().ToString());
+        var created = Assert.IsType<AddNoticeResult.Stored>(
+            await _notices.Add(userId, hand!, CancellationToken.None));
+        _db.ChangeTracker.Clear();
+
+        var stored = Assert.IsType<AddNoticeResult.Stored>(await _notices.Add(
+            userId, Mail("inbox-1", "Acme", "Engineer", "Rejected", At(2), "Not moving forward"), CancellationToken.None));
+
+        Assert.Equal(created.Card.Id, stored.Card.Id);
+        Assert.Equal(NoticeStatus.Rejected, stored.Status);
+        var row = await _db.ApplicationNotices.SingleAsync();
+        Assert.StartsWith("h.", row.MessageId);
+        Assert.Equal("", row.Content);
+    }
+
+    [Fact]
+    public async Task A_hand_add_does_not_advance_an_existing_notice()
+    {
+        var userId = await SeedUser("ada@example.com");
+        await SeedNotice(userId, "inbox-1", "Acme", "Engineer", "Application Sent", At(1));
+        var existing = await _db.ApplicationNotices.Select(n => n.Id).SingleAsync();
+        _db.ChangeTracker.Clear();
+
+        var hand = IncomingNotice.TryHand("Acme", "Engineer", "Interviewing", Guid.NewGuid().ToString());
+        var stored = Assert.IsType<AddNoticeResult.Stored>(
+            await _notices.Add(userId, hand!, CancellationToken.None));
+
+        Assert.NotEqual(existing, stored.Card.Id);
+        Assert.Equal(NoticeStatus.Interviewing, stored.Status);
+        Assert.Equal("Application Sent", await _db.ApplicationNotices.Where(n => n.Id == existing).Select(n => n.Status).SingleAsync());
+        Assert.Equal([stored.Card.Id], (await Lane(userId, NoticeStatus.Interviewing)).Select(n => n.Id));
+        Assert.Equal([existing], (await Lane(userId, NoticeStatus.ApplicationSent)).Select(n => n.Id));
+    }
+
+    [Fact]
     public async Task Moving_for_a_missing_person_is_401_and_clears_the_session()
     {
         var ctx = MoveContext(Guid.CreateVersion7(), "Rejected");
@@ -444,6 +915,27 @@ public sealed class NoticesServiceTests : IDisposable
         _db.Users.Add(new User(id, email, "gmail", DateTime.UtcNow));
         await _db.SaveChangesAsync();
         return id;
+    }
+
+    private async Task<IReadOnlyList<NoticeCard>> Lane(Guid userId, NoticeStatus status)
+    {
+        var page = await _notices.GetNotices(userId, status, NoticesService.MaxLimit, 0, CancellationToken.None);
+        Assert.NotNull(page);
+        return page.Notices;
+    }
+
+    private static IncomingNotice Mail(
+        string messageId, string company, string? role, string status, DateTime sentAt, string content)
+    {
+        Assert.True(ApplicationStatusText.TryFromDisplayName(status, out var parsed));
+        var extracted = new Apptrack.Services.NoticeExtraction.ApplicationNotice(
+            company,
+            role is null ? ApplicationRole.Unnamed : ApplicationRole.Named(role),
+            parsed,
+            new DateTimeOffset(sentAt));
+        var incoming = IncomingNotice.FromMailbox(messageId, extracted, content);
+        Assert.NotNull(incoming);
+        return incoming;
     }
 
     private async Task SeedNotice(Guid userId, string messageId, string company, string? role, string status, DateTime sentAt)

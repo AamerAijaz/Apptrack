@@ -21,7 +21,7 @@ public sealed class ApplicationNoticeConfiguration : IEntityTypeConfiguration<Ap
         builder.Property(n => n.MessageId).HasMaxLength(ApplicationNotice.MessageIdMaxLength).IsRequired();
         builder.Property(n => n.UserId).IsRequired();
         builder.Property(n => n.Company).IsRequired();
-        builder.Property(n => n.Status).HasMaxLength(ApplicationNotice.StatusMaxLength).IsRequired();
+        builder.Property(n => n.Status).HasMaxLength(ApplicationNotice.StatusMaxLength).IsRequired().IsConcurrencyToken();
         builder.Property(n => n.SentAt).IsRequired();
         builder.Property(n => n.Content).IsRequired();
 

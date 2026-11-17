@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Apptrack.Auth;
 using Apptrack.Services;
+using Microsoft.EntityFrameworkCore;
 
 namespace Apptrack.Endpoints;
 
@@ -30,6 +31,7 @@ public static class NoticesEndpoint
     /// <summary>
     /// Cookie user only. 401 clears the cookie when the person is missing.
     /// 400 leaves the cookie. 404 is a notice the person does not have.
+    /// 409 leaves the cookie when the stage changed since it was read.
     /// 200 is the move and a repeat move to the same stage.
     /// </summary>
     public static async Task<IResult> MoveAsync(
@@ -52,7 +54,17 @@ public static class NoticesEndpoint
         if (status is null)
             return Results.BadRequest();
 
-        switch (await notices.Move(userId, id, status, ct))
+        MoveNoticeResult moved;
+        try
+        {
+            moved = await notices.Move(userId, id, status, ct);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            return Results.Conflict();
+        }
+
+        switch (moved)
         {
             case MoveNoticeResult.MissingPerson:
                 session.Clear(ctx.Response);

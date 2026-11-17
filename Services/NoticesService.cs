@@ -281,15 +281,39 @@ public sealed class NoticesService(AppDbContext db, TimeProvider time)
 
     /// <summary>
     /// The only insert. Hand and mailbox share the unique (UserId, MessageId) check, including soft-deleted rows.
-    /// A hand message id is built only by <see cref="HandMessageId.Format"/>. Hand Sent at and Created at are one
-    /// clock reading. Mailbox Sent at is the mail instant. Its Created at, and the id, are a new clock reading.
-    /// A unique-index race detaches the added entry and reads again. Replay returns the stored card.
+    /// A mailbox notice that is Interviewing, Accepted, or Rejected moves the newest earlier notice for the same
+    /// person, Company, and Role. The same status, or a later Interviewing or Accepted notice, is returned as stored.
+    /// The incoming message id is remembered against that notice and does not replace its own message. A repeat
+    /// returns that notice unchanged. A later Rejected notice is a finished candidacy and does not block a new row.
+    /// Application Sent always inserts.
+    /// A hand add does not look for a match. A hand message id is built only by <see cref="HandMessageId.Format"/>.
+    /// Hand Sent at and Created at are one clock reading. Mailbox Sent at is the mail instant. Its Created at, and
+    /// the id, are a new clock reading. A unique-index race detaches the added entry and reads again. Replay of a
+    /// stored message id returns that row unchanged.
     /// </summary>
     public async Task<AddNoticeResult> Add(Guid userId, IncomingNotice notice, CancellationToken ct)
     {
         var person = await db.Users.AnyAsync(u => u.Id == userId, ct);
         if (!person)
             return new AddNoticeResult.MissingPerson();
+
+        if (notice is IncomingNotice.ByMailbox mail)
+        {
+            var existing = await Find(userId, mail.MessageId, ct);
+            if (existing is not null)
+                return ToResult(existing);
+
+            var applied = await Applied(userId, mail.MessageId, ct);
+            if (applied is not null)
+                return applied;
+
+            if (mail.Status != NoticeStatus.ApplicationSent)
+            {
+                var reconciled = await Reconcile(userId, mail, ct);
+                if (reconciled is not null)
+                    return reconciled;
+            }
+        }
 
         var recorded = UtcInstant.From(time.GetUtcNow());
         var candidate = notice switch
@@ -303,19 +327,112 @@ public sealed class NoticesService(AppDbContext db, TimeProvider time)
                 recorded,
                 recorded,
                 ""),
-            IncomingNotice.ByMailbox mail => new Entities.ApplicationNotice(
+            IncomingNotice.ByMailbox mailbox => new Entities.ApplicationNotice(
                 userId,
-                mail.MessageId,
-                mail.Company,
-                mail.Role,
-                mail.Status,
-                mail.SentAt,
+                mailbox.MessageId,
+                mailbox.Company,
+                mailbox.Role,
+                mailbox.Status,
+                mailbox.SentAt,
                 recorded,
-                mail.Content),
+                mailbox.Content),
             _ => throw new InvalidOperationException("A notice is either entered by hand or read from mail."),
         };
 
-        var stored = await InsertOnce(candidate, ct);
+        if (notice is IncomingNotice.ByMailbox claimed)
+            db.AppliedMailboxMessages.Add(new Entities.AppliedMailboxMessage(userId, claimed.MessageId, candidate.Id));
+
+        return ToResult(await InsertOnce(candidate, ct));
+    }
+
+    /// <summary>
+    /// Null means no notice on the board should absorb this mail, so the caller inserts.
+    /// </summary>
+    private async Task<AddNoticeResult?> Reconcile(
+        Guid userId, IncomingNotice.ByMailbox mail, CancellationToken ct)
+    {
+        var company = mail.Company.Value;
+        var role = mail.Role?.Value;
+        var matches = db.ApplicationNotices.Where(n => n.UserId == userId && n.Company == company);
+        matches = role is null
+            ? matches.Where(n => n.Role == null)
+            : matches.Where(n => n.Role == role);
+
+        var notices = await matches
+            .OrderByDescending(n => n.CreatedAt)
+            .ThenByDescending(n => n.Id)
+            .ToListAsync(ct);
+
+        var incoming = StageIndex(mail.Status.Label);
+        var earlier = notices.FirstOrDefault(n => StageIndex(n.Status) < incoming);
+        if (earlier is not null)
+        {
+            earlier.MoveTo(mail.Status);
+            return await Remember(userId, mail, earlier, ct);
+        }
+
+        var same = notices.FirstOrDefault(n => StageIndex(n.Status) == incoming);
+        if (same is not null)
+            return await Remember(userId, mail, same, ct);
+
+        var laterOpen = notices.FirstOrDefault(n =>
+            StageIndex(n.Status) > incoming && IsOpenStage(n.Status));
+        if (laterOpen is not null)
+            return await Remember(userId, mail, laterOpen, ct);
+
+        return null;
+    }
+
+    /// <summary>
+    /// The message was already applied to a notice. Null when this message id is new.
+    /// A removed notice stays retired.
+    /// </summary>
+    private async Task<AddNoticeResult?> Applied(Guid userId, string messageId, CancellationToken ct)
+    {
+        var notice = await AppliedNotice(userId, messageId, ct);
+        return notice is null ? null : ToResult(notice);
+    }
+
+    /// <summary>
+    /// Remembers the mailbox message against the notice. A unique race returns the notice already stored for it.
+    /// </summary>
+    private async Task<AddNoticeResult> Remember(
+        Guid userId, IncomingNotice.ByMailbox mail, Entities.ApplicationNotice notice, CancellationToken ct)
+    {
+        var applied = new Entities.AppliedMailboxMessage(userId, mail.MessageId, notice.Id);
+        db.AppliedMailboxMessages.Add(applied);
+        try
+        {
+            await db.SaveChangesAsync(ct);
+            return ToResult(notice);
+        }
+        catch (DbUpdateException)
+        {
+            db.Entry(applied).State = EntityState.Detached;
+            db.Entry(notice).State = EntityState.Detached;
+            var stored = await Applied(userId, mail.MessageId, ct);
+            if (stored is not null)
+                return stored;
+            throw;
+        }
+    }
+
+    private static bool IsOpenStage(string label) =>
+        label == NoticeStatus.Interviewing.Label || label == NoticeStatus.Accepted.Label;
+
+    private static int StageIndex(string label)
+    {
+        for (var i = 0; i < NoticeStatus.All.Count; i++)
+        {
+            if (NoticeStatus.All[i].Label == label)
+                return i;
+        }
+
+        throw new InvalidOperationException("A stored notice has a status the board does not know.");
+    }
+
+    private static AddNoticeResult ToResult(Entities.ApplicationNotice stored)
+    {
         if (stored.DeletedAt is not null)
             return new AddNoticeResult.Retired();
 
@@ -353,7 +470,10 @@ public sealed class NoticesService(AppDbContext db, TimeProvider time)
     {
         var existing = await Find(candidate.UserId, candidate.MessageId, ct);
         if (existing is not null)
+        {
+            DetachPendingMessage(candidate.UserId, candidate.MessageId);
             return existing;
+        }
 
         db.ApplicationNotices.Add(candidate);
         try
@@ -364,11 +484,41 @@ public sealed class NoticesService(AppDbContext db, TimeProvider time)
         catch (DbUpdateException)
         {
             db.Entry(candidate).State = EntityState.Detached;
+            DetachPendingMessage(candidate.UserId, candidate.MessageId);
             var stored = await Find(candidate.UserId, candidate.MessageId, ct);
-            if (stored is null)
-                throw;
-            return stored;
+            if (stored is not null)
+                return stored;
+
+            var applied = await AppliedNotice(candidate.UserId, candidate.MessageId, ct);
+            if (applied is not null)
+                return applied;
+            throw;
         }
+    }
+
+    private void DetachPendingMessage(Guid userId, string messageId)
+    {
+        foreach (var entry in db.ChangeTracker.Entries<Entities.AppliedMailboxMessage>())
+        {
+            if (entry.State == EntityState.Added
+                && entry.Entity.UserId == userId
+                && entry.Entity.MessageId == messageId)
+                entry.State = EntityState.Detached;
+        }
+    }
+
+    private async Task<Entities.ApplicationNotice?> AppliedNotice(Guid userId, string messageId, CancellationToken ct)
+    {
+        var noticeId = await db.AppliedMailboxMessages
+            .Where(m => m.UserId == userId && m.MessageId == messageId)
+            .Select(m => (Guid?)m.NoticeId)
+            .SingleOrDefaultAsync(ct);
+        if (noticeId is null)
+            return null;
+
+        return await db.ApplicationNotices
+            .IgnoreQueryFilters()
+            .SingleAsync(n => n.Id == noticeId, ct);
     }
 
     private Task<Entities.ApplicationNotice?> Find(Guid userId, string messageId, CancellationToken ct) =>
